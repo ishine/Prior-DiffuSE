@@ -21,7 +21,7 @@ class DiffUNet(nn.Module):
                                   TCM())
 
     def forward(self, x):
-        x, en_list = self.en(x)  # [b,c,t,f]
+        x, en_list = self.en(x)  # [b,c,t,f], c = 2
         x = x.permute(0, 2, 1, 3)  # [b,t,c,f]
         x = x.reshape(x.size()[0], x.size()[1], -1).permute(0, 2, 1)  # [b, cf, t]
         x = self.TCMs(x).permute(0, 2, 1)

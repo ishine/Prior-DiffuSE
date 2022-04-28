@@ -37,7 +37,7 @@ class ComplexDDPMTrainer(object):
                                         collate_fn=collate.collate_fn)
 
         '''model'''
-        self.model = eval(self.config.model.name)().cuda()
+        self.model = eval(self.config.model.name)().cuda()  # set the evaluation mode: Dropout, BatchNorm affected
         '''optimizer'''
         if self.config.optim.optimizer == 'Adam':
             self.optimizer = torch.optim.Adam(
@@ -67,14 +67,14 @@ class ComplexDDPMTrainer(object):
                 self.optimizer.zero_grad()
                 batch_feat = batch.feats.cuda()
                 batch_label = batch.labels.cuda()
-                noisy_phase = torch.atan2(batch_feat[:, -1, :, :], batch_feat[:, 0, :, :])
-                clean_phase = torch.atan2(batch_label[:, -1, :, :], batch_label[:, 0, :, :])
+                noisy_phase = torch.atan2(batch_feat[:, -1, :, :], batch_feat[:, 0, :, :])  # [B, 1, T, F] noisy_phase means <相成分>, batch_feat means <batch feature> ?
+                clean_phase = torch.atan2(batch_label[:, -1, :, :], batch_label[:, 0, :, :])    # torch.atan2 means 双变量反正切函数,值域为（-pi, pi）
 
                 '''four approaches for feature compression'''
                 if self.config.train.feat_type == 'normal':
-                    batch_feat, batch_label = torch.norm(batch_feat, dim=1), torch.norm(batch_label, dim=1)
+                    batch_feat, batch_label = torch.norm(batch_feat, dim=1), torch.norm(batch_label, dim=1) # [B, 1, T, F] <相应频率下的分量幅度>
                 elif self.config.train.feat_type == 'sqrt':
-                    batch_feat, batch_label = (torch.norm(batch_feat, dim=1)) ** 0.5, (
+                    batch_feat, batch_label = (torch.norm(batch_feat, dim=1)) ** 0.5, ( # 范数的平方根？
                         torch.norm(batch_label, dim=1)) ** 0.5
                 elif self.config.train.feat_type == 'cubic':
                     batch_feat, batch_label = (torch.norm(batch_feat, dim=1)) ** 0.3, (
@@ -83,15 +83,15 @@ class ComplexDDPMTrainer(object):
                     batch_feat, batch_label = torch.log(torch.norm(batch_feat, dim=1) + 1), \
                                               torch.log(torch.norm(batch_label, dim=1) + 1)
                 if self.config.train.feat_type in ['normal', 'sqrt', 'cubic', 'log_1x']:
-                    batch_feat = torch.stack((batch_feat * torch.cos(noisy_phase), batch_feat * torch.sin(noisy_phase)),
+                    batch_feat = torch.stack((batch_feat * torch.cos(noisy_phase), batch_feat * torch.sin(noisy_phase)),    # [B, 2, T, F] <相应频率下的分量幅度在 实轴和虚轴的投影>
                                              dim=1)
                     batch_label = torch.stack(
                         (batch_label * torch.cos(clean_phase), batch_label * torch.sin(clean_phase)),
                         dim=1)
                 batch_frame_num_list = batch.frame_num_list
-                est_list = self.model(batch_feat)
+                est_list = self.model(batch_feat)   # x_hat = model(y) [B, 2, T, F]
 
-                batch_loss = eval(self.config.train.loss)(est_list, batch_label, batch_frame_num_list)
+                batch_loss = eval(self.config.train.loss)(est_list, batch_label, batch_frame_num_list)  # loss class: mse...
                 batch_loss.backward()
                 self.optimizer.step()
                 wandb.log(
@@ -134,7 +134,7 @@ class ComplexDDPMTrainer(object):
 
                     batch_loss = eval(self.config.train.loss)(est_list, batch_label, batch.frame_num_list)
                     batch_result = compare_complex(est_list, batch_label, batch.frame_num_list,
-                                                   feat_type=self.config.train.feat_type)
+                                                   feat_type=self.config.train.feat_type)   # compute evaluate metrics
                     all_loss_list.append(batch_loss.item())
                     all_csig_list.append(batch_result[0])
                     all_cbak_list.append(batch_result[1])
@@ -145,7 +145,7 @@ class ComplexDDPMTrainer(object):
 
                 wandb.log(
                     {
-                        'test_mean_mse_loss': np.mean(all_loss_list),
+                        'test_mean_mse_loss': np.mean(all_loss_list),   # mean loss in val dataset
                         'test_mean_csig': np.mean(all_csig_list),
                         'test_mean_cbak': np.mean(all_cbak_list),
                         'test_mean_covl': np.mean(all_covl_list),
@@ -161,9 +161,9 @@ class ComplexDDPMTrainer(object):
                 if self.config.optim.half_lr > 1:
                     if cur_avg_loss >= prev_cv_loss:
                         cv_no_impv += 1
-                        if cv_no_impv == self.config.optim.half_lr:
+                        if cv_no_impv == self.config.optim.half_lr: # adjust lr depend on cv_no_impv
                             harving = True
-                        if cv_no_impv >= self.config.optim.early_stop > 0:
+                        if cv_no_impv >= self.config.optim.early_stop > 0:  # early stop
                             logging.info("No improvement and apply early stop")
                             break
                     else:
@@ -180,7 +180,7 @@ class ComplexDDPMTrainer(object):
 
                 if cur_avg_loss < best_cv_loss:
                     logging.info(
-                        f"best loss is: {best_cv_loss}, current loss is: {cur_avg_loss}, save best_checkpoint.pth")
+                        f"last best loss is: {best_cv_loss}, current loss is: {cur_avg_loss}, save best_checkpoint.pth")
                     best_cv_loss = cur_avg_loss
                     states = [
                         self.model.state_dict(),
@@ -208,6 +208,7 @@ class ComplexDDPMTrainer(object):
                 c = np.sqrt(np.sum((feat_wav ** 2)) / len(feat_wav))
                 feat_wav = feat_wav / c
                 feat_wav = torch.FloatTensor(feat_wav)
+                '''这里没有像 train 的时候 进行补零 collate.collate_fn'''
                 feat_x = torch.stft(feat_wav,
                                     n_fft=self.config.train.fft_num,
                                     hop_length=self.config.train.win_shift,
@@ -219,7 +220,7 @@ class ComplexDDPMTrainer(object):
                     feat_mag_x = feat_mag_x ** 0.5
                 feat_x = torch.stack(
                     (feat_mag_x * torch.cos(feat_phase_x), feat_mag_x * torch.sin(feat_phase_x)),
-                    dim=0)
+                    dim=0)  # [2, T, F]
                 esti_x = self.model(feat_x.unsqueeze(dim=0)).squeeze(dim=0)
                 esti_mag, esti_phase = torch.norm(esti_x, dim=0), torch.atan2(esti_x[-1, :, :],
                                                                               esti_x[0, :, :])
