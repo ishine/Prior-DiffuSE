@@ -21,12 +21,12 @@ class DiffUNet(nn.Module):
                                   TCM())
 
     def forward(self, x):
-        x, en_list = self.en(x)  # [b,c,t,f], c = 2
-        x = x.permute(0, 2, 1, 3)  # [b,t,c,f]
-        x = x.reshape(x.size()[0], x.size()[1], -1).permute(0, 2, 1)  # [b, cf, t]
-        x = self.TCMs(x).permute(0, 2, 1)
-        x = x.reshape(x.size()[0], x.size()[1], 64, 4)  # [b,t,c,f]
-        x = x.permute(0, 2, 1, 3)
+        x, en_list = self.en(x)  # [b,c,t,f_], c = 64, f_ = 4
+        x = x.permute(0, 2, 1, 3)  # [b,t,c,f_]
+        x = x.reshape(x.size()[0], x.size()[1], -1).permute(0, 2, 1)  # [b, c * f_, t]
+        x = self.TCMs(x).permute(0, 2, 1)   # [b, t, c * f_]
+        x = x.reshape(x.size()[0], x.size()[1], 64, 4)  # [b, t, c, f_]
+        x = x.permute(0, 2, 1, 3)   # [b,c,t,f_], c = 64, f_ = 4
         x_real = self.de_real(x, en_list)
         x_imag = self.de_imag(x, en_list)
         out = torch.cat((x_real, x_imag), dim=1)
@@ -65,26 +65,26 @@ class Encoder(nn.Module):
             nn.PReLU()
         )
 
-    def forward(self, x):
+    def forward(self, x):   # [b, 2, t, f]
         en_list = []
-        x = self.pad1(x)
-        x = self.conv1(x)
+        x = self.pad1(x)    # [b, 2, t+1, f]
+        x = self.conv1(x)   # [b, 64, t, (f-5)/2 + 1]
         x = self.en1(x)
         en_list.append(x)
         x = self.pad1(x)
-        x = self.conv2(x)
+        x = self.conv2(x)   # [b, 64, t, (f_-3)/2 + 1]
         x = self.en2(x)
         en_list.append(x)
         x = self.pad1(x)
-        x = self.conv3(x)
+        x = self.conv3(x)   # [b, 64, t, (f_-3)/2 + 1]
         x = self.en3(x)
         en_list.append(x)
         x = self.pad1(x)
-        x = self.conv4(x)
+        x = self.conv4(x)   # [b, 64, t, (f_-3)/2 + 1]
         x = self.en4(x)
         en_list.append(x)
         x = self.pad1(x)
-        x = self.conv5(x)
+        x = self.conv5(x)   # [b, 64, t, (f_-3)/2 + 1]
         x = self.en5(x)
         en_list.append(x)
         return x, en_list
@@ -127,12 +127,12 @@ class Decoder(nn.Module):
             # nn.PReLU()
         )
 
-    def forward(self, x, x_list):
-        x = self.de5(torch.cat((x, x_list[-1]), dim=1))
-        x = self.de4(torch.cat((x, x_list[-2]), dim=1))
-        x = self.de3(torch.cat((x, x_list[-3]), dim=1))
-        x = self.de2(torch.cat((x, x_list[-4]), dim=1))
-        x = self.de1(torch.cat((x, x_list[-5]), dim=1))
+    def forward(self, x, x_list):   # [b,c,t,f_], c = 128, f_ = 4
+        x = self.de5(torch.cat((x, x_list[-1]), dim=1))     # [b,64,t-1,f_ * 2 + 1]
+        x = self.de4(torch.cat((x, x_list[-2]), dim=1))     # [b,64,t_ - 1,f_ * 2 + 1]
+        x = self.de3(torch.cat((x, x_list[-3]), dim=1))     # [b,64,t_ - 1,f_ * 2 + 1]
+        x = self.de2(torch.cat((x, x_list[-4]), dim=1))     # [b,64,t_ - 1,f_ * 2 + 1]
+        x = self.de1(torch.cat((x, x_list[-5]), dim=1))     # [b,64,t_ - 1,f_ * 2 + 3]
         return x
 
 
@@ -177,10 +177,11 @@ class Residual(nn.Module):
         x = self.mainbranch(x) * self.maskbranch(x)
         x = self.conv2(x)
         out = x + t
+        # 这里不需要 relu 和 BatchNorm 吗
         return out
 
 
-class TCM(nn.Module):
+class TCM(nn.Module):   # 空洞卷积 --> 不损失特征图尺寸的条件下扩大感受野
     def __init__(self):
         super(TCM, self).__init__()
         self.residual1 = Residual(dilation=1)
@@ -190,14 +191,14 @@ class TCM(nn.Module):
         self.residual5 = Residual(dilation=16)
         self.residual6 = Residual(dilation=32)
 
-    def forward(self, x):
+    def forward(self, x):   # [c, cf=256, t]
         x = self.residual1(x)
         x = self.residual2(x)
         x = self.residual3(x)
         x = self.residual4(x)
         x = self.residual5(x)
         x = self.residual6(x)
-        return x
+        return x    # [c, cf=256, t]
 
 
 class up_Chomp_F(nn.Module):
