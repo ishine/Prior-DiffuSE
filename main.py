@@ -92,8 +92,8 @@ def main():
     if args.generate:
         trainer.generate_wav(load_pre_train=True)
     else:
-        trainer.train()
-
+        # trainer.train()
+        trainer.train_ddpm()
 
 if __name__ == '__main__':
     main()

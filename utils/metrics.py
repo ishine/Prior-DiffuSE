@@ -552,6 +552,7 @@ def compare_complex(esti_list, label_list, frame_list, feat_type='sqrt'):
         clean_utts, esti_utts = [], []
         utt_num = label_list.size()[0]
         for i in range(utt_num):
+            # print("utt_num: ", i)
             tf_esti = esti_com[i, :, :, :].unsqueeze(dim=0).permute(0, 3, 2, 1).cpu()
             t_esti = torch.istft(tf_esti, n_fft=320, hop_length=160, win_length=320,
                                  window=torch.hann_window(320)).transpose(1, 0).squeeze(dim=-1).numpy()
@@ -564,6 +565,7 @@ def compare_complex(esti_list, label_list, frame_list, feat_type='sqrt'):
             clean_utts.append(t_label)
 
         for c, p in zip(clean_utts, esti_utts):
+            # print("clean_utts: ", c)
             batch_result = compareone((c, p))
             all_csig_list.append(batch_result[0])
             all_cbak_list.append(batch_result[1])

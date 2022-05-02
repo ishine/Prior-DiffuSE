@@ -2,8 +2,11 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset, DataLoader
 from copy import deepcopy
+
+import utils.params
 from utils import *
 from model import *
+from model.diff2 import DiffWave
 import logging
 import wandb
 from tqdm import tqdm
@@ -16,13 +19,24 @@ class ComplexDDPMTrainer(object):
         # config
         self.args = deepcopy(args)
         self.config = deepcopy(config)
+
+        # ddpm added
+        self.params = utils.params.params
+        self.step = 0
+        self.noise_schedule = np.linspace(1e-4, 0.05, 50).tolist()
+        beta = np.array(self.noise_schedule)
+        noise_level = np.cumprod(1 - beta)
+        self.noise_level = torch.tensor(noise_level.astype(np.float32))
+
+        self.loss_fn = nn.L1Loss()
+
         '''dataset & dataloader'''
         collate = Collate(self.config)
-        tr_dataset = VBTrDataset('data/noisy_trainset_wav', 'data/clean_trainset_wav', config)
+        self.tr_dataset = VBTrDataset('data/noisy_trainset_wav', 'data/clean_trainset_wav', config)
         cv_dataset = VBCvDataset('data/noisy_testset_wav', 'data/clean_testset_wav', config)
-        logging.info(f'Total {tr_dataset.__len__()} train data.')  # 11572
+        logging.info(f'Total {self.tr_dataset.__len__()} train data.')  # 11572
         logging.info(f'Total {cv_dataset.__len__()} eval data.')  # 824
-        self.tr_dataloader = DataLoader(tr_dataset,
+        self.tr_dataloader = DataLoader(self.tr_dataset,
                                         batch_size=self.config.train.batch_size,
                                         shuffle=True,
                                         drop_last=True,
@@ -38,10 +52,16 @@ class ComplexDDPMTrainer(object):
 
         '''model'''
         self.model = eval(self.config.model.name)().cuda()  # set the evaluation mode: Dropout, BatchNorm affected
+        self.model_ddpm = DiffWave(args, self.params).cuda()
         '''optimizer'''
         if self.config.optim.optimizer == 'Adam':
             self.optimizer = torch.optim.Adam(
                 self.model.parameters(),
+                self.config.optim.lr,
+                weight_decay=self.config.optim.l2
+            )
+            self.optimizer_ddpm = torch.optim.Adam(
+                self.model_ddpm.parameters(),
                 self.config.optim.lr,
                 weight_decay=self.config.optim.l2
             )
@@ -53,6 +73,93 @@ class ComplexDDPMTrainer(object):
 
         '''logger'''
         wandb.watch(self.model, log="all")
+
+    def train_ddpm(self, max_steps=None):
+        device = next(self.model.parameters()).device
+        for epoch in range(self.config.train.n_epochs):
+            logging.info(f'Epoch {epoch}')
+            self.model_ddpm.train()
+            '''train'''
+            for features in tqdm(self.tr_dataloader):
+                if max_steps is not None and self.step >= max_steps:
+                    return
+                loss = self.train_step(features)
+                if torch.isnan(loss).any():
+                    raise RuntimeError(f'Detected NaN loss at step {self.step}.')
+                if self.step % 50 == 0:
+                    continue
+                    # self._write_summary(self.step, features, loss)
+                if self.step % len(self.tr_dataset) == 0:
+                    continue
+                        # self.save_to_checkpoint()
+                self.step += 1
+    def train_step(self, features):
+        self.optimizer_ddpm.zero_grad()
+        batch_feat = features.feats.cuda()
+        batch_label = features.labels.cuda()
+        noisy_phase = torch.atan2(batch_feat[:, -1, :, :], batch_feat[:, 0, :,
+                                                           :])  # [B, 1, T, F] noisy_phase means <相成分>, batch_feat means <batch feature> ?
+        clean_phase = torch.atan2(batch_label[:, -1, :, :],
+                                  batch_label[:, 0, :, :])  # torch.atan2 means 双变量反正切函数,值域为（-pi, pi）
+
+        '''four approaches for feature compression'''
+        if self.config.train.feat_type == 'normal':
+            batch_feat, batch_label = torch.norm(batch_feat, dim=1), torch.norm(batch_label,
+                                                                                dim=1)  # [B, 1, T, F] <相应频率下的分量幅度>
+        elif self.config.train.feat_type == 'sqrt':
+            batch_feat, batch_label = (torch.norm(batch_feat, dim=1)) ** 0.5, (  # 范数的平方根？
+                torch.norm(batch_label, dim=1)) ** 0.5
+        elif self.config.train.feat_type == 'cubic':
+            batch_feat, batch_label = (torch.norm(batch_feat, dim=1)) ** 0.3, (
+                torch.norm(batch_label, dim=1)) ** 0.3
+        elif self.config.train.feat_type == 'log_1x':
+            batch_feat, batch_label = torch.log(torch.norm(batch_feat, dim=1) + 1), \
+                                      torch.log(torch.norm(batch_label, dim=1) + 1)
+        if self.config.train.feat_type in ['normal', 'sqrt', 'cubic', 'log_1x']:
+            batch_feat = torch.stack((batch_feat * torch.cos(noisy_phase), batch_feat * torch.sin(noisy_phase)),
+                                     # [B, 2, T, F] <相应频率下的分量幅度在 实轴和虚轴的投影>
+                                     dim=1)
+            batch_label = torch.stack(
+                (batch_label * torch.cos(clean_phase), batch_label * torch.sin(clean_phase)),
+                dim=1)
+        batch_frame_num_list = features.frame_num_list
+
+        # 传入 ddpm
+        # 展开为向量
+        # print("batch_feat: ", batch_feat.shape)
+        init_audio = self.get_audio_init(batch_feat) # [8, 2, 301, 161]
+        init_audio = torch.flatten(init_audio, start_dim=1)
+        # init_audio = torch.cat((init_audio[:,0,:,:], init_audio[:,1,:,:]), 2) # [8, 301, 322]
+
+        # print("init_audio: ", init_audio.shape)
+        batch_feat = torch.flatten(batch_feat, start_dim=1) # [B, 2*T*F]
+        batch_label = torch.flatten(batch_label, start_dim=1)
+
+        N, T = batch_feat.shape  # B = 1, audio = [B, 2*T*F]
+        device = batch_feat.device
+        self.noise_level = self.noise_level.to(device)
+
+        # batch_feat = batch_feat - audio_init  # pirorGrad x0' = x0 - x_init
+        t = torch.randint(0, len(self.noise_schedule), [N], device=device)
+        noise_scale = self.noise_level[t].unsqueeze(1)
+        noise_scale_sqrt = noise_scale ** 0.5
+        noise = torch.randn_like(batch_feat)    # epsilon
+        noisy_audio = noise_scale_sqrt * batch_feat + (1.0 - noise_scale) ** 0.5 * noise # xt
+        # print("noisy_audio: ", noisy_audio.shape)
+        predicted = self.model_ddpm(noisy_audio, init_audio, t)  # epsilon^hat
+        loss = self.loss_fn(noise, predicted.squeeze(1))
+        # print(loss)
+        wandb.log(
+            {'train_batch_loss': loss.item()}
+        )
+        loss.backward()
+        self.optimizer_ddpm.step()
+
+        return loss
+
+    def get_audio_init(self, batch_feat):
+        audio_init = self.model(batch_feat)
+        return audio_init
 
     def train(self):
         prev_cv_loss = float("inf")
@@ -106,7 +213,7 @@ class ComplexDDPMTrainer(object):
                 for batch in tqdm(self.cv_dataloader):
                     batch_feat = batch.feats.cuda()
                     batch_label = batch.labels.cuda()
-                    noisy_phase = torch.atan2(batch_feat[:, -1, :, :], batch_feat[:, 0, :, :])
+                    noisy_phase = torch.atan2(batch_feat[:, -1, :, :], batch_feat[:, 0, :, :])  # [B, 1, T, F]
                     clean_phase = torch.atan2(batch_label[:, -1, :, :], batch_label[:, 0, :, :])
 
                     '''four approaches for feature compression'''
@@ -123,16 +230,17 @@ class ComplexDDPMTrainer(object):
                                                   torch.log(torch.norm(batch_label, dim=1) + 1)
                     if self.config.train.feat_type in ['normal', 'sqrt', 'cubic', 'log_1x']:
                         batch_feat = torch.stack(
-                            (batch_feat * torch.cos(noisy_phase), batch_feat * torch.sin(noisy_phase)),
+                            (batch_feat * torch.cos(noisy_phase), batch_feat * torch.sin(noisy_phase)), # [B, 2, T, F]
                             dim=1)
                         batch_label = torch.stack(
                             (batch_label * torch.cos(clean_phase), batch_label * torch.sin(clean_phase)),
                             dim=1)
 
-                    est_list = self.model(batch_feat)
+                    est_list = self.model(batch_feat)   # [B, 2, T, F]
                     # est_list = batch_feat
 
                     batch_loss = eval(self.config.train.loss)(est_list, batch_label, batch.frame_num_list)
+                    # print("evaluate loss: ", batch_loss)
                     batch_result = compare_complex(est_list, batch_label, batch.frame_num_list,
                                                    feat_type=self.config.train.feat_type)   # compute evaluate metrics
                     all_loss_list.append(batch_loss.item())
@@ -208,7 +316,7 @@ class ComplexDDPMTrainer(object):
                 c = np.sqrt(np.sum((feat_wav ** 2)) / len(feat_wav))
                 feat_wav = feat_wav / c
                 feat_wav = torch.FloatTensor(feat_wav)
-                '''这里没有像 train 的时候 进行补零 collate.collate_fn'''
+                '''这里没有像 train 的时候 进行补零(collate.collate_fn) 虽然不会对输入model的数据维数产生影响，会不会对 wav_len < chunk_length 的样本产生影响'''
                 feat_x = torch.stft(feat_wav,
                                     n_fft=self.config.train.fft_num,
                                     hop_length=self.config.train.win_shift,
