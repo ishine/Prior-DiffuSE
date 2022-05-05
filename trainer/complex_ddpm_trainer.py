@@ -6,7 +6,8 @@ from copy import deepcopy
 import utils.params
 from utils import *
 from model import *
-from model.diff2 import DiffWave
+# from model.diff2 import DiffWave
+from model.diff3 import DiffUNet1
 import logging
 import wandb
 from tqdm import tqdm
@@ -51,7 +52,7 @@ class ComplexDDPMTrainer(object):
 
         '''model'''
         self.model = eval(self.config.model.name)().cuda()  # set the evaluation mode: Dropout, BatchNorm affected
-        self.model_ddpm = DiffWave(args, self.params).cuda()
+        self.model_ddpm = DiffUNet1(self.params).cuda()
         '''optimizer'''
         if self.config.optim.optimizer == 'Adam':
             self.optimizer = torch.optim.Adam(
@@ -119,7 +120,7 @@ class ComplexDDPMTrainer(object):
                 if torch.isnan(loss).any():
                     raise RuntimeError(f'Detected NaN loss at step {self.step}.')
 
-                if self.step +1  % len(self.dataset) == 0:
+                if self.step +1  % len(self.tr_dataloader) == 0:
                     # self._write_summary(self.step, features, loss)
                     '''evaluate'''
                     self.model.eval()
@@ -155,14 +156,9 @@ class ComplexDDPMTrainer(object):
                                     dim=1)
 
                             init_audio = self.model(batch_feat)  # [B, 2, T, F]
-                            _, _, Ts, Fs = init_audio.shape
-                            init_audio = torch.flatten(init_audio, start_dim=1)
-                            batch_feat = torch.flatten(batch_feat, start_dim=1)  # [B, 2*T*F]
-                            batch_label = torch.flatten(batch_label, start_dim=1)
 
-                            # %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-                            # est_list = batch_feat
-                            audio = torch.randn_like(batch_feat)
+
+                            audio = torch.randn_like(init_audio)    # noise --> XT
                             gamma = [0 for i in alpha]  # the first 2 num didn't use
                             for n in range(len(alpha)):
                                 gamma[n] = sigmas[n]
@@ -172,8 +168,7 @@ class ComplexDDPMTrainer(object):
                                 c1 = 1 / alpha[n] ** 0.5
                                 c2 = beta[n] / (1 - alpha_cum[n]) ** 0.5
                                 predicted_noise = self.model_ddpm(audio, init_audio,
-                                                                  torch.tensor([T[n]], device=audio.device)).squeeze(
-                                    1)  # xt-1 = model(Xt, condition, t)
+                                                                  torch.tensor([T[n]], device=audio.device))  # xt-1 = model(Xt, condition, t)
                                 mu = audio - c2 * predicted_noise
                                 # audio = c1 * ((1-gamma[n])*mu+gamma[n]* (noisy_audio-init_audio))                                                 # 插值
                                 audio = c1 * mu  # 不插值 step = 100k pesq = 2.79
@@ -185,11 +180,7 @@ class ComplexDDPMTrainer(object):
 
                                 audio = torch.clamp(audio, -1.0, 1.0)
                             audio += init_audio
-                            audio = audio.reshape([audio.shape[0], 2, Ts, Fs])
-                            batch_label = batch_label.reshape([batch_label.shape[0], 2, Ts, Fs])
 
-                            # print("audio", audio.shape)
-                            # print("batch_label", batch_label.shape)
 
                             # batch_loss = eval(self.config.train.loss)(audio, batch_label, batch.frame_num_list)
                             batch_loss = self.loss_fn(batch_label, audio)
@@ -288,11 +279,10 @@ class ComplexDDPMTrainer(object):
                 dim=1)
         batch_frame_num_list = features.frame_num_list
 
-        # 传入 ddpm
-        # 展开为向量
         # print("batch_feat: ", batch_feat.shape)
         '''loss1'''
         init_audio = self.model(batch_feat) # [8, 2, 301, 161]
+        print()
         # 计算 model 参数量 model 总参数数量和：1662565 model_ddpm 总参数数量和：1258371
         # params = list(self.model.parameters())
         # k = 0
@@ -318,15 +308,9 @@ class ComplexDDPMTrainer(object):
 
         loss1 = eval(self.config.train.loss)(init_audio, batch_label, batch_frame_num_list)
 
-        '''loss2'''
-        init_audio = torch.flatten(init_audio, start_dim=1)
-        # init_audio = torch.cat((init_audio[:,0,:,:], init_audio[:,1,:,:]), 2) # [8, 301, 322]
+        '''loss2 ddpm'''
 
-        # print("init_audio: ", init_audio.shape)
-        batch_feat = torch.flatten(batch_feat, start_dim=1) # [B, 2*T*F]
-        batch_label = torch.flatten(batch_label, start_dim=1)
-
-        N, T = batch_feat.shape  # B = 1, T = 2*T*F
+        N  = batch_feat.shape[0]  # Batch
         device = batch_feat.device
         self.noise_level = self.noise_level.to(device)
 
