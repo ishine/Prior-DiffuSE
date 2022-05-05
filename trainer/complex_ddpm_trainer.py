@@ -119,8 +119,7 @@ class ComplexDDPMTrainer(object):
                 if torch.isnan(loss).any():
                     raise RuntimeError(f'Detected NaN loss at step {self.step}.')
 
-                if self.step+1 % 500 == 0:
-                    # continue
+                if self.step +1  % len(self.dataset) == 0:
                     # self._write_summary(self.step, features, loss)
                     '''evaluate'''
                     self.model.eval()
@@ -259,6 +258,7 @@ class ComplexDDPMTrainer(object):
 
     def train_step(self, features):
         self.optimizer_ddpm.zero_grad()
+        self.optimizer.zero_grad()
         batch_feat = features.feats.cuda()
         batch_label = features.labels.cuda()
         noisy_phase = torch.atan2(batch_feat[:, -1, :, :], batch_feat[:, 0, :,
@@ -339,17 +339,19 @@ class ComplexDDPMTrainer(object):
         # print("noisy_audio: ", noisy_audio.shape)
         predicted = self.model_ddpm(noisy_audio, init_audio, t)  # epsilon^hat
         loss2 = self.loss_fn(noise, predicted.squeeze(1))
-        # print(loss)
-        lamdba = 1
-        loss = loss2 + lamdba * loss1
+        lamdba = 0.00001
+        loss = lamdba*loss2 + loss1
         wandb.log(
             {'dis_loss': loss1.item(),
              'ddpm_loss': loss2.item(),
              'loss_sum': loss.item()}
         )
+        # loss = loss1
+        # wandb.log(
+        #     {'loss_sum': loss.item()}
+        # )
         loss.backward()
         self.optimizer.step()
-        init_audio.detach()
         self.optimizer_ddpm.step()
 
 
