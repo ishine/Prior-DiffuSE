@@ -31,7 +31,7 @@ class DiffWave(nn.Module):
     x = F.relu(x) # [8,64, 96922]
 
     diffusion_step = self.diffusion_embedding(diffusion_step)
-    print("x:", x.shape)
+    # print("x:", x.shape)
     # print("diffusion_step:", diffusion_step.shape)
 
     # spectrogram = self.spectrogram_upsampler(audio_init)  #  [8, 301, 322] ->

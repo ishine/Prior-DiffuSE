@@ -26,14 +26,15 @@ def parse_args_and_config():
     parser.add_argument('--verbose', type=str, default='info', help='Verbose level: info | debug | warning | critical')
     parser.add_argument('--doc', type=str, default='diff', help='A string for documentation purpose')
     parser.add_argument('--comment', type=str, default='', help='A string for experiment comment')
-    parser.add_argument('--assets', type=str, default='assets', help='Path for saving running related data.')
+    parser.add_argument('--assets', type=str, default='assets_dpm', help='Path for saving running related data.')
     parser.add_argument('--generate', action='store_true', help='Whether to test the model')
     parser.add_argument('--retrain', action='store_true', help='Whether to test the model')
-
+    parser.add_argument('--fast', type=str, default='True', help='fast sampling')
     args = parser.parse_args()
     args.log = os.path.join(args.assets, 'log', args.doc)
     args.checkpoint = os.path.join(args.assets, 'checkpoint', args.doc)
     args.generated_wav = os.path.join(args.assets, 'wav', args.doc)
+
 
     # parse config file
     with open(os.path.join('conf', args.config), 'r') as f:
