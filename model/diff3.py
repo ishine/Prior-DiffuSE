@@ -16,16 +16,16 @@ class DiffUNet1(nn.Module):
         super(DiffUNet1, self).__init__()
         self.params = params
         self.preprocess = Preprocess()
-        # self.time_embedding = TimeEmbedding(len(params.noise_schedule))   # oom!
+        self.time_embedding = TimeEmbedding(len(params.noise_schedule))   # oom!
 
         # create positional embeddings (Vaswani et al, 2018)
-        c_dim = 512
-        dims = torch.arange(c_dim // 2).unsqueeze(0)  # (1, c_dim  // 2)
-        steps = torch.arange(len(params.noise_schedule)).unsqueeze(1)  # (nb_timesteps, 1)
-        first_half = torch.sin(steps * 10. ** (dims * 4. / (c_dim // 2 - 1)))
-        second_half = torch.cos(steps * 10. ** (dims * 4. / (c_dim // 2 - 1)))
-        time_embedding = torch.cat((first_half, second_half), dim=1)  # (nb_timesteps, c_dim)
-        self.register_buffer('time_embedding', time_embedding)
+        # c_dim = 512
+        # dims = torch.arange(c_dim // 2).unsqueeze(0)  # (1, c_dim  // 2)
+        # steps = torch.arange(len(params.noise_schedule)).unsqueeze(1)  # (nb_timesteps, 1)
+        # first_half = torch.sin(steps * 10. ** (dims * 4. / (c_dim // 2 - 1)))
+        # second_half = torch.cos(steps * 10. ** (dims * 4. / (c_dim // 2 - 1)))
+        # time_embedding = torch.cat((first_half, second_half), dim=1)  # (nb_timesteps, c_dim)
+        # self.register_buffer('time_embedding', time_embedding)
 
         self.en = Encoder()
         self.de_real = Decoder()
@@ -36,12 +36,12 @@ class DiffUNet1(nn.Module):
 
     def forward(self, x, x_init, t):
         x = self.preprocess(x, x_init)
-        # t = self.time_embedding(t)      # torch.Size([1, 512])
+        t = self.time_embedding(t)      # torch.Size([1, 512])
         # print(t)
-        if t.dtype in [torch.int32, torch.int64]:
-            t = self.time_embedding[t]
-        else:
-            t = self.time_embedding[(torch.floor(t)).long()]      # torch.Size([1, 512])  for t.typy != int: t = floor(t)
+        # if t.dtype in [torch.int32, torch.int64]:
+        #     t = self.time_embedding[t]
+        # else:
+        #     t = self.time_embedding[(torch.floor(t)).long()]      # torch.Size([1, 512])  for t.typy != int: t = floor(t)
 
         # print(t.shape)
         # exit()
@@ -78,17 +78,20 @@ class TimeEmbedding(nn.Module): # from diffwave
     return x
 
   def _lerp_embedding(self, t):
-    low_idx = torch.floor(t).long()
+    # print(t.shape)
+    # print(self.embedding.shape) # [50, 128]
+    low_idx = torch.floor(t).long()     # [8]
     high_idx = torch.ceil(t).long()
-    low = self.embedding[low_idx]
+    low = self.embedding[low_idx]       # [8, 128]
     high = self.embedding[high_idx]
-    return low + (high - low) * (t - low_idx)
+    return low + (high - low) * (t - low_idx).unsqueeze(1)   # [8, 128]
 
   def _build_embedding(self, max_steps):
     steps = torch.arange(max_steps).unsqueeze(1)  # [T,1]
     dims = torch.arange(64).unsqueeze(0)          # [1,64]
     table = steps * 10.0**(dims * 4.0 / 63.0)     # [T,64]
     table = torch.cat([torch.sin(table), torch.cos(table)], dim=1)
+    print("t", table.shape)
     return table
 
 

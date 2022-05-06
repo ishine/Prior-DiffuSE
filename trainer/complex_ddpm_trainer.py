@@ -2,7 +2,6 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset, DataLoader
 from copy import deepcopy
-
 import utils.params
 from utils import *
 from model import *
@@ -26,6 +25,8 @@ class ComplexDDPMTrainer(object):
         self.step = 0
         beta = np.array(self.params.noise_schedule)
         noise_level = np.cumprod(1 - beta)
+        print(noise_level)
+        exit()
         self.noise_level = torch.tensor(noise_level.astype(np.float32))
 
         self.loss_fn = nn.L1Loss()
@@ -65,12 +66,13 @@ class ComplexDDPMTrainer(object):
                 self.config.optim.lr,
                 weight_decay=self.config.optim.l2
             )
-
+        '''pretrain'''
         if self.args.retrain:
             pretrained_data = torch.load(os.path.join(self.args.checkpoint, 'best_checkpoint.pth'))
             self.model.load_state_dict(pretrained_data[0])
             self.optimizer.load_state_dict(pretrained_data[1])
-
+            # self.model_ddpm.load_state_dict(pretrained_data[2])
+            # self.optimizer_ddpm.load_state_dict(pretrained_data[3])
         '''logger'''
         wandb.watch(self.model, log="all")
 
@@ -121,12 +123,15 @@ class ComplexDDPMTrainer(object):
                 if torch.isnan(loss).any():
                     raise RuntimeError(f'Detected NaN loss at step {self.step}.')
 
-                if self.step % len(self.tr_dataloader) == 0:
+                if self.step  % len(self.tr_dataloader) == 0:
                     # self._write_summary(self.step, features, loss)
                     '''evaluate'''
                     self.model.eval()
+                    self.model_ddpm.eval()
                     all_loss_list = []
                     all_csig_list, all_cbak_list, all_covl_list, all_pesq_list, all_ssnr_list, all_stoi_list = [], [], [], [], [], []
+                    all_loss_list_init = []
+                    all_csig_list_init, all_cbak_list_init, all_covl_list_init, all_pesq_list_init, all_ssnr_list_init, all_stoi_list_init = [], [], [], [], [], []
                     alpha, beta, alpha_cum, sigmas, T = self.inference_schedule(fast_sampling=self.args.fast)
                     with torch.no_grad():
                         for batch in tqdm(self.cv_dataloader):
@@ -169,26 +174,26 @@ class ComplexDDPMTrainer(object):
                             for n in range(len(alpha) - 1, -1, -1):
                                 c1 = 1 / alpha[n] ** 0.5
                                 c2 = beta[n] / (1 - alpha_cum[n]) ** 0.5
-                                # print("T[n]", torch.tensor([T[n]], device=audio.device).repeat(N))
+                                # print("T[n]", torch.tensor([T[n]], device=audio.device).repeat(N).shape)
+                                # print("T", torch.randint(0, len(self.params.noise_schedule), [N], device=device).shape)
                                 # print("audio", audio.shape)
                                 predicted_noise = self.model_ddpm(audio, init_audio,
                                                                   torch.tensor([T[n]], device=audio.device).repeat(N))  # xt-1 = model(Xt, condition, t)
                                 mu = audio - c2 * predicted_noise
                                 # audio = c1 * ((1-gamma[n])*mu+gamma[n]* (noisy_audio-init_audio))                                                 # 插值
-                                audio = c1 * mu  # 不插值 step = 100k pesq = 2.79
+                                audio = c1 * mu
                                 if n > 0:
                                     noise = torch.randn_like(audio)
                                     sigma = ((1.0 - alpha_cum[n - 1]) / (1.0 - alpha_cum[n]) * beta[n]) ** 0.5
                                     newsigma = max(0, sigma - c1 * gamma[n])
                                     audio += newsigma * noise
 
-                                audio = torch.clamp(audio, -1.0, 1.0)
+                                # audio = torch.clamp(audio, -1.0, 1.0) # Diffuse used after preprocess
                             audio += init_audio
 
-
-                            # batch_loss = eval(self.config.train.loss)(audio, batch_label, batch.frame_num_list)
+                            '''metrics compute'''
+                            # x
                             batch_loss = self.loss_fn(batch_label, audio)
-                            # print("evaluate loss: ", batch_loss)
                             batch_result = compare_complex(audio, batch_label, batch.frame_num_list,
                                                            feat_type=self.config.train.feat_type)  # compute evaluate metrics
                             all_loss_list.append(batch_loss.item())
@@ -199,6 +204,18 @@ class ComplexDDPMTrainer(object):
                             all_ssnr_list.append(batch_result[4])
                             all_stoi_list.append(batch_result[5])
 
+                            # x_init
+                            # batch_loss = self.loss_fn(batch_label, init_audio)
+                            # batch_result = compare_complex(init_audio, batch_label, batch.frame_num_list,
+                            #                                feat_type=self.config.train.feat_type)  # compute evaluate metrics
+                            # all_loss_list_init.append(batch_loss.item())
+                            # all_csig_list_init.append(batch_result[0])
+                            # all_cbak_list_init.append(batch_result[1])
+                            # all_covl_list_init.append(batch_result[2])
+                            # all_pesq_list_init.append(batch_result[3])
+                            # all_ssnr_list_init.append(batch_result[4])
+                            # all_stoi_list_init.append(batch_result[5])
+
                         wandb.log(
                             {
                                 'test_mean_mse_loss': np.mean(all_loss_list),  # mean loss in val dataset
@@ -207,7 +224,14 @@ class ComplexDDPMTrainer(object):
                                 'test_mean_covl': np.mean(all_covl_list),
                                 'test_mean_pesq': np.mean(all_pesq_list),
                                 'test_mean_ssnr': np.mean(all_ssnr_list),
-                                'test_mean_stoi': np.mean(all_stoi_list),
+                                'test_mean_stoi': np.mean(all_stoi_list)
+                                # 'test_mean_mse_loss_init': np.mean(all_loss_list_init),
+                                # 'test_mean_csig_init': np.mean(all_csig_list_init),
+                                # 'test_mean_cbak_init': np.mean(all_cbak_list_init),
+                                # 'test_mean_covl_init': np.mean(all_covl_list_init),
+                                # 'test_mean_pesq_init': np.mean(all_pesq_list_init),
+                                # 'test_mean_ssnr_init': np.mean(all_ssnr_list_init),
+                                # 'test_mean_stoi_init': np.mean(all_stoi_list_init)
                             }
                         )
 
@@ -240,20 +264,24 @@ class ComplexDDPMTrainer(object):
                         states = [
                             self.model.state_dict(),
                             self.optimizer.state_dict(),
+                            self.model_ddpm.state_dict(),
+                            self.optimizer_ddpm.state_dict()
                         ]
                         torch.save(states, os.path.join(self.args.checkpoint, 'best_checkpoint.pth'))
-                    if self.step % len(self.tr_dataset) == 0:
-                        # save latest checkpoint
-                        states = [
-                            self.model.state_dict(),
-                            self.optimizer.state_dict(),
-                        ]
-                        torch.save(states, os.path.join(self.args.checkpoint, f'checkpoint_{epoch}.pth'))
+                    # if self.step % len(self.tr_dataset) == 0:
+                    '''save latest checkpoint'''
+                    states = [
+                        self.model.state_dict(),
+                        self.optimizer.state_dict(),
+                        self.model_ddpm.state_dict(),
+                        self.optimizer_ddpm.state_dict()
+                    ]
+                    torch.save(states, os.path.join(self.args.checkpoint, f'checkpoint_{epoch}.pth'))
                 self.step += 1
 
     def train_step(self, features):
         self.optimizer_ddpm.zero_grad()
-        self.optimizer.zero_grad()
+        # self.optimizer.zero_grad()
         batch_feat = features.feats.cuda()
         batch_label = features.labels.cuda()
         noisy_phase = torch.atan2(batch_feat[:, -1, :, :], batch_feat[:, 0, :,
@@ -285,7 +313,7 @@ class ComplexDDPMTrainer(object):
 
         # print("batch_feat: ", batch_feat.shape)
         '''loss1'''
-        init_audio = self.model(batch_feat) # [8, 2, 301, 161]
+        init_audio = self.model(batch_feat).detach() # [8, 2, 301, 161]
         # 计算 model 参数量 model 总参数数量和：1662565 model_ddpm 总参数数量和：1258371
         # params = list(self.model.parameters())
         # k = 0
@@ -309,7 +337,7 @@ class ComplexDDPMTrainer(object):
         # print("model_ddpm 总参数数量和：" + str(k))
         # exit(0)
 
-        loss1 = eval(self.config.train.loss)(init_audio, batch_label, batch_frame_num_list)
+        # loss1 = eval(self.config.train.loss)(init_audio, batch_label, batch_frame_num_list)
 
         '''loss2 ddpm'''
 
@@ -328,24 +356,29 @@ class ComplexDDPMTrainer(object):
         # print("noise_scale_sqrt: ", noise_scale_sqrt.shape)
         # _ = noise_scale_sqrt * batch_label
         # exit()
-        noisy_audio = noise_scale_sqrt * batch_label + (1.0 - noise_scale) ** 0.5 * noise # xt
+        # print("batch_label-init_audio:", batch_label-init_audio)
+        noisy_audio = noise_scale_sqrt * (batch_label-init_audio) + (1.0 - noise_scale) ** 0.5 * noise # xt
+
 
         predicted = self.model_ddpm(noisy_audio, init_audio, t)  # epsilon^hat
-        loss2 = self.loss_fn(noise, predicted)
-        lamdba = 0.00001
-        loss = lamdba*loss2 + loss1
+        # loss2 = self.loss_fn(noise, predicted)
+        loss_ddpm = com_mse_loss(predicted, noise , batch_frame_num_list)
+        lamdba = 1
+        loss = lamdba*loss_ddpm
 
         wandb.log(
-            {'dis_loss': loss1.item(),
-             'ddpm_loss': loss2.item(),
-             'loss_sum': loss.item()}
+            {
+             # 'dis_loss': loss1.item(),
+             'ddpm_loss': loss_ddpm.item(),
+             # 'loss_sum': loss.item()
+            }
         )
         # loss = loss1
         # wandb.log(
         #     {'loss_sum': loss.item()}
         # )
         loss.backward()
-        self.optimizer.step()
+        # self.optimizer.step()
         self.optimizer_ddpm.step()
 
 
