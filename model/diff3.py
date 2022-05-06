@@ -37,7 +37,11 @@ class DiffUNet1(nn.Module):
     def forward(self, x, x_init, t):
         x = self.preprocess(x, x_init)
         # t = self.time_embedding(t)      # torch.Size([1, 512])
-        t = self.time_embedding[t]      # torch.Size([1, 512])
+        # print(t)
+        if t.dtype in [torch.int32, torch.int64]:
+            t = self.time_embedding[t]
+        else:
+            t = self.time_embedding[(torch.floor(t)).long()]      # torch.Size([1, 512])  for t.typy != int: t = floor(t)
 
         # print(t.shape)
         # exit()

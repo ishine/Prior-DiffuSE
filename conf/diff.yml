@@ -1,5 +1,5 @@
 train:
-  batch_size: 1
+  batch_size: 10
   n_epochs: 50
   loss: "com_mag_mse_loss"
   chunk_length: 48000

@@ -74,7 +74,7 @@ class ComplexDDPMTrainer(object):
         '''logger'''
         wandb.watch(self.model, log="all")
 
-    def inference_schedule(self, fast_sampling=False):
+    def inference_schedule(self, fast_sampling=True):
         training_noise_schedule = np.array(self.params.noise_schedule)
         inference_noise_schedule = np.array(
             self.params.inference_noise_schedule) if fast_sampling else training_noise_schedule
@@ -104,6 +104,7 @@ class ComplexDDPMTrainer(object):
         return alpha, beta, alpha_cum, sigmas, T
 
     def train_ddpm(self, max_steps=None):
+        torch.backends.cudnn.enabled = True
         prev_cv_loss = float("inf")
         best_cv_loss = float("inf")
         cv_no_impv = 0
@@ -120,7 +121,7 @@ class ComplexDDPMTrainer(object):
                 if torch.isnan(loss).any():
                     raise RuntimeError(f'Detected NaN loss at step {self.step}.')
 
-                if self.step +1  % len(self.tr_dataloader) == 0:
+                if self.step % len(self.tr_dataloader) == 0:
                     # self._write_summary(self.step, features, loss)
                     '''evaluate'''
                     self.model.eval()
@@ -159,6 +160,7 @@ class ComplexDDPMTrainer(object):
 
 
                             audio = torch.randn_like(init_audio)    # noise --> XT
+                            N = audio.shape[0]
                             gamma = [0 for i in alpha]  # the first 2 num didn't use
                             for n in range(len(alpha)):
                                 gamma[n] = sigmas[n]
@@ -167,8 +169,10 @@ class ComplexDDPMTrainer(object):
                             for n in range(len(alpha) - 1, -1, -1):
                                 c1 = 1 / alpha[n] ** 0.5
                                 c2 = beta[n] / (1 - alpha_cum[n]) ** 0.5
+                                # print("T[n]", torch.tensor([T[n]], device=audio.device).repeat(N))
+                                # print("audio", audio.shape)
                                 predicted_noise = self.model_ddpm(audio, init_audio,
-                                                                  torch.tensor([T[n]], device=audio.device))  # xt-1 = model(Xt, condition, t)
+                                                                  torch.tensor([T[n]], device=audio.device).repeat(N))  # xt-1 = model(Xt, condition, t)
                                 mu = audio - c2 * predicted_noise
                                 # audio = c1 * ((1-gamma[n])*mu+gamma[n]* (noisy_audio-init_audio))                                                 # 插值
                                 audio = c1 * mu  # 不插值 step = 100k pesq = 2.79
@@ -282,7 +286,6 @@ class ComplexDDPMTrainer(object):
         # print("batch_feat: ", batch_feat.shape)
         '''loss1'''
         init_audio = self.model(batch_feat) # [8, 2, 301, 161]
-        print()
         # 计算 model 参数量 model 总参数数量和：1662565 model_ddpm 总参数数量和：1258371
         # params = list(self.model.parameters())
         # k = 0
@@ -316,15 +319,22 @@ class ComplexDDPMTrainer(object):
 
         # batch_feat = batch_feat - audio_init  # pirorGrad x0' = x0 - x_init
         t = torch.randint(0, len(self.params.noise_schedule), [N], device=device)
-        noise_scale = self.noise_level[t].unsqueeze(1)
+        # print("t:", t)
+        noise_scale = self.noise_level[t].unsqueeze(1).unsqueeze(2).unsqueeze(3)
         noise_scale_sqrt = noise_scale ** 0.5
         noise = torch.randn_like(batch_feat)    # epsilon
+        # print("batch_label: ", batch_label.shape)
+        # print("noise: ", noise.shape)
+        # print("noise_scale_sqrt: ", noise_scale_sqrt.shape)
+        # _ = noise_scale_sqrt * batch_label
+        # exit()
         noisy_audio = noise_scale_sqrt * batch_label + (1.0 - noise_scale) ** 0.5 * noise # xt
-        # print("noisy_audio: ", noisy_audio.shape)
+
         predicted = self.model_ddpm(noisy_audio, init_audio, t)  # epsilon^hat
-        loss2 = self.loss_fn(noise, predicted.squeeze(1))
+        loss2 = self.loss_fn(noise, predicted)
         lamdba = 0.00001
         loss = lamdba*loss2 + loss1
+
         wandb.log(
             {'dis_loss': loss1.item(),
              'ddpm_loss': loss2.item(),
