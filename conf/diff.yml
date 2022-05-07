@@ -1,7 +1,7 @@
 train:
   batch_size: 8
   n_epochs: 50
-  loss: "com_mag_mse_loss"
+  loss: "com_mse_loss"
   chunk_length: 48000
   win_size: 320
   fft_num: 320
@@ -14,7 +14,6 @@ model:
   name: 'DiffUNet'
 model_ddpm:
   name: 'DiffWave'
-  noise_schedule:
 
 optim:
   optimizer: 'Adam'
@@ -25,7 +24,7 @@ optim:
 
 optim_ddpm:
   optimizer: 'Adam'
-  lr: 0.0001
+  lr: 0.0002
   l2: 0.0000001
   half_lr: 3  # whether to decay learning rate to half scale.
   early_stop: 5   # early stop training when no improvement in k epochs.

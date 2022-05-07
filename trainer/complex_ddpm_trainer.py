@@ -11,6 +11,9 @@ import logging
 import wandb
 from tqdm import tqdm
 from scripts.draw_spectrum import plot_stft
+import matplotlib.pyplot as plt
+from plotnine import *
+import pandas as pd
 
 wandb.init(project="ddpm")
 
@@ -100,8 +103,6 @@ class ComplexDDPMTrainer(object):
         beta = inference_noise_schedule
         alpha = 1 - beta
         alpha_cum = np.cumprod(alpha)
-        # print("alpha_cum", talpha_cum)
-        # print("gamma_cum", alpha_cum)
         sigmas = [0 for i in alpha]
         for n in range(len(alpha) - 1, -1, -1):
             sigmas[n] = ((1.0 - alpha_cum[n - 1]) / (1.0 - alpha_cum[n]) * beta[n]) ** 0.5      # sqrt(beta_t^tilde)
@@ -116,6 +117,21 @@ class ComplexDDPMTrainer(object):
                     T.append(t + twiddle)   # from schedule to T which as the input of model
                     break
         T = np.array(T, dtype=np.float32)
+        idx = [i for i in range(len(alpha))]
+        v_dict = {
+            "idx": idx,
+            "alpha": alpha,
+            "beta": beta,
+            "alpha_cum": alpha_cum,
+            "sigmas": sigmas,
+            "T": T
+        }
+        data_df = pd.DataFrame(v_dict)
+        data_plot = pd.melt(data_df[["idx", "alpha","beta", "alpha_cum", "sigmas"]], id_vars=["idx"])   # melt turn col_name into feature
+        print(data_plot)
+        plot =  ggplot(data_plot) + geom_line(aes(x="idx", y="value", color='variable'))+ xlab("steps")
+        plot.save("full_sample.pdf")
+
         return alpha, beta, alpha_cum, sigmas, T
 
     def train_ddpm(self, max_steps=None):
@@ -129,6 +145,8 @@ class ComplexDDPMTrainer(object):
 
         '''training'''
         for epoch in range(self.config.train.n_epochs):
+            alpha, beta, alpha_cum, sigmas, T = self.inference_schedule(fast_sampling=self.params.fast_sampling)
+            exit()
             logging.info(f'Epoch {epoch}')
             self.model_ddpm.train()
             # self.model.train()
@@ -140,180 +158,194 @@ class ComplexDDPMTrainer(object):
                 if torch.isnan(loss).any():
                     raise RuntimeError(f'Detected NaN loss at step {self.step}.')
 
-                '''evaluation after an epoch'''
-                if self.step -1 % len(self.tr_dataloader) == 0:
-                    # self._write_summary(self.step, features, loss)
-                    self.model.eval()
-                    self.model_ddpm.eval()
-                    all_loss_list = []
-                    all_csig_list, all_cbak_list, all_covl_list, all_pesq_list, all_ssnr_list, all_stoi_list = [], [], [], [], [], []
-                    all_loss_list_init = []
-                    all_csig_list_init, all_cbak_list_init, all_covl_list_init, all_pesq_list_init, all_ssnr_list_init, all_stoi_list_init = [], [], [], [], [], []
-                    alpha, beta, alpha_cum, sigmas, T = self.inference_schedule(fast_sampling=self.args.fast)
-                    '''test T == T_train'''
+            '''evaluation after an epoch'''
+            self.model.eval()
+            self.model_ddpm.eval()
+            all_loss_list = []
+            all_csig_list, all_cbak_list, all_covl_list, all_pesq_list, all_ssnr_list, all_stoi_list = [], [], [], [], [], []
+            # all_loss_list_init = []
+            # all_csig_list_init, all_cbak_list_init, all_covl_list_init, all_pesq_list_init, all_ssnr_list_init, all_stoi_list_init = [], [], [], [], [], []
+            alpha, beta, alpha_cum, sigmas, T = self.inference_schedule(fast_sampling=self.params.fast_sampling)
+
+            with torch.no_grad():
+                for batch in tqdm(self.cv_dataloader):
+                    batch_feat = batch.feats.cuda()
+                    batch_label = batch.labels.cuda()
+                    # print(batch_label)
+                    '''four approaches for feature compression'''
+                    noisy_phase = torch.atan2(batch_feat[:, -1, :, :], batch_feat[:, 0, :, :])  # [B, 1, T, F]
+                    clean_phase = torch.atan2(batch_label[:, -1, :, :], batch_label[:, 0, :, :])
+
+                    if self.config.train.feat_type == 'normal':
+                        batch_feat, batch_label = torch.norm(batch_feat, dim=1), torch.norm(batch_label, dim=1)
+                    elif self.config.train.feat_type == 'sqrt':
+                        batch_feat, batch_label = (torch.norm(batch_feat, dim=1)) ** 0.5, (
+                            torch.norm(batch_label, dim=1)) ** 0.5
+                    elif self.config.train.feat_type == 'cubic':
+                        batch_feat, batch_label = (torch.norm(batch_feat, dim=1)) ** 0.3, (
+                            torch.norm(batch_label, dim=1)) ** 0.3
+                    elif self.config.train.feat_type == 'log_1x':
+                        batch_feat, batch_label = torch.log(torch.norm(batch_feat, dim=1) + 1), \
+                                                  torch.log(torch.norm(batch_label, dim=1) + 1)
+                    if self.config.train.feat_type in ['normal', 'sqrt', 'cubic', 'log_1x']:
+                        batch_feat = torch.stack(
+                            (batch_feat * torch.cos(noisy_phase), batch_feat * torch.sin(noisy_phase)),
+                            # [B, 2, T, F]
+                            dim=1)
+                        batch_label = torch.stack(
+                            (batch_label * torch.cos(clean_phase), batch_label * torch.sin(clean_phase)),
+                            dim=1)
+
+                    '''evaluation'''
+                    init_audio = self.model(batch_feat)  # [B, 2, T, F]
+                    audio = torch.randn_like(init_audio)                                                        # XT = N(0, I),  [N, 2, T, F]
+                    # print(audio)
+                    # print(audio.shape)
+                    # print("________________________________________________________________")
+                    # print(audio)
                     # exit()
+                    N = audio.shape[0]
+                    gamma = [0 for i in alpha]                                                                  # the first 2 num didn't use
+                    for n in range(len(alpha)):
+                        gamma[n] = sigmas[n]                                                                    # beta^tilde
+                    # print(gamma)    #[0.715, 0.0095, 0.031, 0.095, 0.220, 0.412]
+                    gamma[0] = 0.2                                                                              # beta^tilde_0 = 0.2
+                    # print("gamma",gamma)
+                    for n in range(len(alpha) - 1, -1, -1):
+                        c1 = 1 / alpha[n] ** 0.5                                                                # c1 in mu equation
+                        c2 = beta[n] / (1 - alpha_cum[n]) ** 0.5                                                # c2 in mu equation
+                        # print("T[n]", torch.tensor([T[n]], device=audio.device).repeat(N).shape)
+                        # print("T", torch.randint(0, len(self.params.noise_schedule), [N], device=device).shape)
+                        # print("audio", audio.shape)
+                        predicted_noise = self.model_ddpm(audio, init_audio,                                    # z_theta(x_t, condition, t)
+                                                          torch.tensor([T[n]], device=audio.device).repeat(N))
+                        # audio = c1 * ((1-gamma[n])*mu+gamma[n]* (noisy_audio-init_audio))  # 插值
+                        audio = c1 * (audio - c2 * predicted_noise)                                             # mu_theta(x_t, z_theta)
+                        # print("________________________________________________________________")
+                        # print(predicted_noise)
+                        # print("________________________________________________________________")
+                        # print("predicted_noise", predicted_noise.shape)
+                        # print("c1", c1)
+                        # print("c2", c2)
+                        # print("predicted_noise", predicted_noise)
+                        # print(audio)
+                        if n > 0:
+                            noise = torch.randn_like(audio)
+                            sigma = gamma[n]                                                                    # sigma = gamma[n]
+                            # newsigma = max(0, sigma - c1 * gamma[n])                                            # ???
+                            audio += sigma * noise                                                           # x_t-1 = mu_theta + beta^tilde * epsilon
 
-                    with torch.no_grad():
-                        for batch in tqdm(self.cv_dataloader):
-                            batch_feat = batch.feats.cuda()
-                            batch_label = batch.labels.cuda()
-                            # print(batch_label)
-                            '''four approaches for feature compression'''
-                            noisy_phase = torch.atan2(batch_feat[:, -1, :, :], batch_feat[:, 0, :, :])  # [B, 1, T, F]
-                            clean_phase = torch.atan2(batch_label[:, -1, :, :], batch_label[:, 0, :, :])
+                        # audio = torch.clamp(audio, -1.0, 1.0) # Diffuse used after preprocess
+                    # audio += init_audio
 
-                            if self.config.train.feat_type == 'normal':
-                                batch_feat, batch_label = torch.norm(batch_feat, dim=1), torch.norm(batch_label, dim=1)
-                            elif self.config.train.feat_type == 'sqrt':
-                                batch_feat, batch_label = (torch.norm(batch_feat, dim=1)) ** 0.5, (
-                                    torch.norm(batch_label, dim=1)) ** 0.5
-                            elif self.config.train.feat_type == 'cubic':
-                                batch_feat, batch_label = (torch.norm(batch_feat, dim=1)) ** 0.3, (
-                                    torch.norm(batch_label, dim=1)) ** 0.3
-                            elif self.config.train.feat_type == 'log_1x':
-                                batch_feat, batch_label = torch.log(torch.norm(batch_feat, dim=1) + 1), \
-                                                          torch.log(torch.norm(batch_label, dim=1) + 1)
-                            if self.config.train.feat_type in ['normal', 'sqrt', 'cubic', 'log_1x']:
-                                batch_feat = torch.stack(
-                                    (batch_feat * torch.cos(noisy_phase), batch_feat * torch.sin(noisy_phase)),
-                                    # [B, 2, T, F]
-                                    dim=1)
-                                batch_label = torch.stack(
-                                    (batch_label * torch.cos(clean_phase), batch_label * torch.sin(clean_phase)),
-                                    dim=1)
+                    '''plot x0'''
+                    # for i in range(N):
+                    #     # print("t", t[i])
+                    #     print("________________________________________________________________")
+                    #     print("batch_label", torch.max(batch_label), torch.min(batch_label))
+                    #     plot_stft(batch_label[i].cpu(), features.wav_len_list[i], title="batch_label")
+                    #     print("________________________________________________________________")
+                    #     # print("noisy_audio", torch.max(noisy_audio), torch.min(noisy_audio))
+                    #     # plot_stft(noisy_audio[i].cpu(), features.wav_len_list[i], title="noisy_audio")
+                    #     print("________________________________________________________________")
+                    #     print("init_audio", torch.max(init_audio), torch.min(init_audio))
+                    #     plot_stft(init_audio[i].cpu(), features.wav_len_list[i], title="init_audio")
+                    #     print("________________________________________________________________")
+                    #     print("predicted", torch.max(audio), torch.min(audio))
+                    #     plot_stft(audio[i].detach().cpu(), features.wav_len_list[i], title="predicted")
+                    #     print("________________________________________________________________")
+                    #     # print("loss_ddpm", loss_ddpm)
+                    #     print("________________________________________________________________")
 
-                            init_audio = self.model(batch_feat)  # [B, 2, T, F]
+                    '''metrics compute'''
+                    # x
+                    batch_loss = com_mse_loss(audio, batch_label ,batch.frame_num_list)
+                    # print(audio)
+                    # print(batch_label)
+                    # print(batch.frame_num_list)
+                    batch_result = compare_complex(audio, batch_label, batch.frame_num_list,
+                                                   feat_type=self.config.train.feat_type)  # compute evaluate metrics
+                    all_loss_list.append(batch_loss.item())
+                    all_csig_list.append(batch_result[0])
+                    all_cbak_list.append(batch_result[1])
+                    all_covl_list.append(batch_result[2])
+                    all_pesq_list.append(batch_result[3])
+                    all_ssnr_list.append(batch_result[4])
+                    all_stoi_list.append(batch_result[5])
 
+                    # x_init
+                    # batch_loss = self.loss_fn(batch_label, init_audio)
+                    # batch_result = compare_complex(init_audio, batch_label, batch.frame_num_list,
+                    #                                feat_type=self.config.train.feat_type)  # compute evaluate metrics
+                    # all_loss_list_init.append(batch_loss.item())
+                    # all_csig_list_init.append(batch_result[0])
+                    # all_cbak_list_init.append(batch_result[1])
+                    # all_covl_list_init.append(batch_result[2])
+                    # all_pesq_list_init.append(batch_result[3])
+                    # all_ssnr_list_init.append(batch_result[4])
+                    # all_stoi_list_init.append(batch_result[5])
 
-                            audio = torch.randn_like(init_audio)                                                        # XT = N(0, I),  [N, 2, T, F]
-                            # print(audio)
-                            # print(audio.shape)
-                            # print("________________________________________________________________")
-                            # print(audio)
-                            # exit()
-                            N = audio.shape[0]
-                            gamma = [0 for i in alpha]                                                                  # the first 2 num didn't use
-                            for n in range(len(alpha)):
-                                gamma[n] = sigmas[n]                                                                    # beta^tilde
-                            # print(gamma)    #[0.715, 0.0095, 0.031, 0.095, 0.220, 0.412]
-                            gamma[0] = 0.2                                                                              # beta^tilde_0 = 0.2
-                            # print("gamma",gamma)
-                            for n in range(len(alpha) - 1, -1, -1):
-                                c1 = 1 / alpha[n] ** 0.5                                                                # c1 in mu equation
-                                c2 = beta[n] / (1 - alpha_cum[n]) ** 0.5                                                # c2 in mu equation
-                                # print("T[n]", torch.tensor([T[n]], device=audio.device).repeat(N).shape)
-                                # print("T", torch.randint(0, len(self.params.noise_schedule), [N], device=device).shape)
-                                # print("audio", audio.shape)
-                                predicted_noise = self.model_ddpm(audio, init_audio,                                    # z_theta(x_t, condition, t)
-                                                                  torch.tensor([T[n]], device=audio.device).repeat(N))
-                                # audio = c1 * ((1-gamma[n])*mu+gamma[n]* (noisy_audio-init_audio))  # 插值
-                                audio = c1 * (audio - c2 * predicted_noise)                                             # mu_theta(x_t, z_theta)
-                                # print("________________________________________________________________")
-                                # print(predicted_noise)
-                                # print("________________________________________________________________")
-                                # print("predicted_noise", predicted_noise.shape)
-                                # print("c1", c1)
-                                # print("c2", c2)
-                                # print("predicted_noise", predicted_noise)
-                                # print(audio)
-                                if n > 0:
-                                    noise = torch.randn_like(audio)
-                                    sigma = ((1.0 - alpha_cum[n - 1]) / (1.0 - alpha_cum[n]) * beta[n]) ** 0.5          # sigma = gamma[n]
+                wandb.log(
+                    {
+                        'test_com_mse_loss': np.mean(all_loss_list),  # mean loss in val dataset
+                        'test_mean_csig': np.mean(all_csig_list),
+                        'test_mean_cbak': np.mean(all_cbak_list),
+                        'test_mean_covl': np.mean(all_covl_list),
+                        'test_mean_pesq': np.mean(all_pesq_list),
+                        'test_mean_ssnr': np.mean(all_ssnr_list),
+                        'test_mean_stoi': np.mean(all_stoi_list)
+                        # 'test_mean_mse_loss_init': np.mean(all_loss_list_init),
+                        # 'test_mean_csig_init': np.mean(all_csig_list_init),
+                        # 'test_mean_cbak_init': np.mean(all_cbak_list_init),
+                        # 'test_mean_covl_init': np.mean(all_covl_list_init),
+                        # 'test_mean_pesq_init': np.mean(all_pesq_list_init),
+                        # 'test_mean_ssnr_init': np.mean(all_ssnr_list_init),
+                        # 'test_mean_stoi_init': np.mean(all_stoi_list_init)
+                    }
+                )
 
-                                    newsigma = max(0, sigma - c1 * gamma[n])                                            # ???
-                                    audio += newsigma * noise                                                           # x_t-1 = mu_theta + beta^tilde * epsilon
+            cv_loss = np.mean(all_loss_list)
+            '''Adjust the learning rate and early stop'''
+            if self.config.optim.half_lr > 1:
+                if cv_loss >= prev_cv_loss:
+                    cv_no_impv += 1
+                    if cv_no_impv == self.config.optim.half_lr:  # adjust lr depend on cv_no_impv
+                        harving = True
+                    if cv_no_impv >= self.config.optim.early_stop > 0:  # early stop
+                        logging.info("No improvement and apply early stop")
+                        break
+                else:
+                    cv_no_impv = 0
 
-                                # audio = torch.clamp(audio, -1.0, 1.0) # Diffuse used after preprocess
-                            # audio += init_audio
-                            '''metrics compute'''
-                            # x
-                            batch_loss = self.loss_fn_eva(batch_label, audio)
-                            # print(audio)
-                            # print(batch_label)
-                            # print(batch.frame_num_list)
-                            batch_result = compare_complex(audio, batch_label, batch.frame_num_list,
-                                                           feat_type=self.config.train.feat_type)  # compute evaluate metrics
-                            all_loss_list.append(batch_loss.item())
-                            all_csig_list.append(batch_result[0])
-                            all_cbak_list.append(batch_result[1])
-                            all_covl_list.append(batch_result[2])
-                            all_pesq_list.append(batch_result[3])
-                            all_ssnr_list.append(batch_result[4])
-                            all_stoi_list.append(batch_result[5])
+            if harving == True:
+                optim_state = self.optimizer_ddpm.state_dict()
+                for i in range(len(optim_state['param_groups'])):
+                    optim_state['param_groups'][i]['lr'] = optim_state['param_groups'][i]['lr'] / 2.0
+                self.optimizer.load_state_dict(optim_state)
+                logging.info('Learning rate adjusted to %5f' % (optim_state['param_groups'][0]['lr']))
+                harving = False
+            prev_cv_loss = cv_loss
 
-                            # x_init
-                            # batch_loss = self.loss_fn(batch_label, init_audio)
-                            # batch_result = compare_complex(init_audio, batch_label, batch.frame_num_list,
-                            #                                feat_type=self.config.train.feat_type)  # compute evaluate metrics
-                            # all_loss_list_init.append(batch_loss.item())
-                            # all_csig_list_init.append(batch_result[0])
-                            # all_cbak_list_init.append(batch_result[1])
-                            # all_covl_list_init.append(batch_result[2])
-                            # all_pesq_list_init.append(batch_result[3])
-                            # all_ssnr_list_init.append(batch_result[4])
-                            # all_stoi_list_init.append(batch_result[5])
+            if cv_loss < best_cv_loss:
+                logging.info(
+                    f"last best loss is: {best_cv_loss}, current loss is: {cv_loss}, save best_checkpoint.pth")
+                best_cv_loss = cv_loss
+                states = [
+                    self.model.state_dict(),
+                    self.optimizer.state_dict(),
+                    self.model_ddpm.state_dict(),
+                    self.optimizer_ddpm.state_dict()
+                ]
+                torch.save(states, os.path.join(self.args.checkpoint, 'best_checkpoint.pth'))
 
-                        wandb.log(
-                            {
-                                'test_mean_mse_loss': np.mean(all_loss_list),  # mean loss in val dataset
-                                'test_mean_csig': np.mean(all_csig_list),
-                                'test_mean_cbak': np.mean(all_cbak_list),
-                                'test_mean_covl': np.mean(all_covl_list),
-                                'test_mean_pesq': np.mean(all_pesq_list),
-                                'test_mean_ssnr': np.mean(all_ssnr_list),
-                                'test_mean_stoi': np.mean(all_stoi_list)
-                                # 'test_mean_mse_loss_init': np.mean(all_loss_list_init),
-                                # 'test_mean_csig_init': np.mean(all_csig_list_init),
-                                # 'test_mean_cbak_init': np.mean(all_cbak_list_init),
-                                # 'test_mean_covl_init': np.mean(all_covl_list_init),
-                                # 'test_mean_pesq_init': np.mean(all_pesq_list_init),
-                                # 'test_mean_ssnr_init': np.mean(all_ssnr_list_init),
-                                # 'test_mean_stoi_init': np.mean(all_stoi_list_init)
-                            }
-                        )
-
-                    cv_loss = np.mean(all_loss_list)
-                    '''Adjust the learning rate and early stop'''
-                    if self.config.optim.half_lr > 1:
-                        if cv_loss >= prev_cv_loss:
-                            cv_no_impv += 1
-                            if cv_no_impv == self.config.optim.half_lr:  # adjust lr depend on cv_no_impv
-                                harving = True
-                            if cv_no_impv >= self.config.optim.early_stop > 0:  # early stop
-                                logging.info("No improvement and apply early stop")
-                                break
-                        else:
-                            cv_no_impv = 0
-
-                    if harving == True:
-                        optim_state = self.optimizer.state_dict()
-                        for i in range(len(optim_state['param_groups'])):
-                            optim_state['param_groups'][i]['lr'] = optim_state['param_groups'][i]['lr'] / 2.0
-                        self.optimizer.load_state_dict(optim_state)
-                        logging.info('Learning rate adjusted to %5f' % (optim_state['param_groups'][0]['lr']))
-                        harving = False
-                    prev_cv_loss = cv_loss
-
-                    if cv_loss < best_cv_loss:
-                        logging.info(
-                            f"last best loss is: {best_cv_loss}, current loss is: {cv_loss}, save best_checkpoint.pth")
-                        best_cv_loss = cv_loss
-                        states = [
-                            self.model.state_dict(),
-                            self.optimizer.state_dict(),
-                            self.model_ddpm.state_dict(),
-                            self.optimizer_ddpm.state_dict()
-                        ]
-                        torch.save(states, os.path.join(self.args.checkpoint, 'best_checkpoint.pth'))
-                    # if self.step % len(self.tr_dataset) == 0:
-                    '''save latest checkpoint'''
-                    states = [
-                        self.model.state_dict(),
-                        self.optimizer.state_dict(),
-                        self.model_ddpm.state_dict(),
-                        self.optimizer_ddpm.state_dict()
-                    ]
-                    torch.save(states, os.path.join(self.args.checkpoint, f'checkpoint_{epoch}.pth'))
+            '''save latest checkpoint'''
+            states = [
+                self.model.state_dict(),
+                self.optimizer.state_dict(),
+                self.model_ddpm.state_dict(),
+                self.optimizer_ddpm.state_dict()
+            ]
+            torch.save(states, os.path.join(self.args.checkpoint, f'checkpoint_{epoch}.pth'))
 
 
     def train_step(self, features):
@@ -397,28 +429,32 @@ class ComplexDDPMTrainer(object):
         # noisy_audio = noise_scale_sqrt * (batch_label-init_audio) + (1.0 - noise_scale) ** 0.5 * noise  # pirorgrad
         noisy_audio = noise_scale_sqrt * (batch_label) + (1.0 - noise_scale) ** 0.5 * noise
         predicted = self.model_ddpm(noisy_audio, init_audio, t)  # epsilon^hat
+        # for i in range(N):
+        #     print("t", t[i])
+        #     print("________________________________________________________________")
+        #     print("batch_label", torch.max(batch_label), torch.min(batch_label))
+        #     # plot_stft(batch_label[i].cpu(), features.wav_len_list[i], title="batch_label")
+        #     print("________________________________________________________________")
+        #     print("noise_scale_sqrt", noise_scale_sqrt)
+        #     print("noisy_audio", torch.max(noisy_audio), torch.min(noisy_audio))
+        #
+        #     plt.matshow(noisy_audio[i][0].cpu().numpy())
+        #     plt.colorbar()
+        #     plt.show()
+        #     # plot_stft(noisy_audio[i].cpu(), features.wav_len_list[i], title="noisy_audio")
+        #     print("________________________________________________________________")
+        #     print("init_audio", torch.max(init_audio), torch.min(init_audio))
+        #     # plot_stft(init_audio[i].cpu(), features.wav_len_list[i], title="init_audio")
+        #     print("________________________________________________________________")
+        #     print("predicted", torch.max(predicted), torch.min(predicted))
+        #     # plot_stft(predicted[i].detach().cpu(), features.wav_len_list[i], title="predicted")
+        #     print("________________________________________________________________")
+        #     # print("loss_ddpm", loss_ddpm)
+        #     print("________________________________________________________________")
 
         # loss_ddpm = self.loss_fn_eva(noise, predicted)
         loss_ddpm = eval(self.config.train.loss)(predicted, noise , batch_frame_num_list)
 
-        # plot
-        for i in range(N):
-            print("t",t[i])
-            print("________________________________________________________________")
-            print("batch_label", torch.max(batch_label), torch.min(batch_label))
-            plot_stft(batch_label[i].cpu(), features.wav_len_list[i], title="batch_label")
-            print("________________________________________________________________")
-            print("noisy_audio",torch.max(noisy_audio), torch.min(noisy_audio))
-            plot_stft(noisy_audio[i].cpu(), features.wav_len_list[i], title="noisy_audio")
-            print("________________________________________________________________")
-            print("init_audio",torch.max(init_audio), torch.min(init_audio))
-            plot_stft(init_audio[i].cpu(), features.wav_len_list[i], title="init_audio")
-            print("________________________________________________________________")
-            print("predicted",torch.max(predicted), torch.min(predicted))
-            plot_stft(predicted[i].detach().cpu(), features.wav_len_list[i], title="predicted")
-            print("________________________________________________________________")
-            print("loss_ddpm", loss_ddpm)
-            print("________________________________________________________________")
         # loss = self.config.train.lam * loss_ddpm + loss_dis
         loss = loss_ddpm
 

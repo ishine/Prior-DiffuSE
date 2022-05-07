@@ -29,7 +29,6 @@ def parse_args_and_config():
     parser.add_argument('--assets', type=str, default='assets_dpm', help='Path for saving running related data.')
     parser.add_argument('--generate', action='store_true', help='Whether to test the model')
     parser.add_argument('--retrain', action='store_true', help='Whether to test the model')
-    parser.add_argument('--fast', type=str, default='True', help='fast sampling')
     args = parser.parse_args()
     args.log = os.path.join(args.assets, 'log', args.doc)
     args.checkpoint = os.path.join(args.assets, 'checkpoint', args.doc)

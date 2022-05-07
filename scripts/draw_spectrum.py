@@ -38,21 +38,7 @@ def plot_stft(spec, wav_len, title=None, ylabel="freq_bin", aspect="auto", xmax=
     esti_mag = esti_mag ** 2
     esti_com = torch.stack((esti_mag * torch.cos(esti_phase), esti_mag * torch.sin(esti_phase)), dim=0)
     tf_esti = esti_com.permute(2, 1, 0).cpu()
-    t_esti = torch.istft(tf_esti,
-                         n_fft=320,
-                         hop_length=160,
-                         win_length=320,
-                         window=torch.hann_window(320),
-                         length=wav_len)
-    print(t_esti.shape)
 
-    tf_esti_n = torch.stft(t_esti,
-                        n_fft=320,
-                        hop_length=160,
-                        win_length=320,
-                        window=torch.hann_window(320),
-                        return_complex=False).permute(2, 1, 0)
-    print(tf_esti_n.shape)
 
     fig, axs = plt.subplots(1, 2)
     axs[0].set_title(title or "Spectrogram (db)")
