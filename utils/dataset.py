@@ -40,8 +40,13 @@ class Collate(object):
         to_tensor = ToTensor()
         for sample in batch:
             '''normalize in DBAIAT and DARCN'''
+            # print("len(sample[0])",len(sample[0]))
+            # print("np.sum(sample[0] ** 2.0)",np.sum(sample[0] ** 2.0))
             c = np.sqrt(len(sample[0]) / np.sum(sample[0] ** 2.0)) # 在 data 不同维度上做标准化 值域为 (0, sqrt(len(x))), len(x) <= chunk_length
+            # print("c", c)   # c = 10.203176640225276
             noisy_list.append(to_tensor(sample[0] * c))
+            # print("sample[0] * c)", sample[0] * c)
+            # exit()
             clean_list.append(to_tensor(sample[1] * c))
             '''normalize in DiffWave'''
             # noisy_list.append(to_tensor(self.normalize(sample[0])))
@@ -67,7 +72,9 @@ class Collate(object):
             win_length=self.win_size,
             window=torch.hann_window(self.fft_num)
         ).permute(0, 3, 2, 1)  # [B, 2, T, F]
-
+        # print("noisy_list[i]",[torch.max(noisy_list[i]) for i in range(len(noisy_list))])
+        # print("clean_list[i]",[torch.max(clean_list[i]) for i in range(len(clean_list))])
+        # exit()
         return BatchInfo(noisy_list, clean_list, frame_num_list, wav_len_list)  # why return frame_num and wav_len though noisy_list and clean_list is padded
 
 

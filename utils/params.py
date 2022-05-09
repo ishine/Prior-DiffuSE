@@ -33,15 +33,15 @@ class AttrDict(dict):
 
 
 params = AttrDict(
-    fast_sampling=False,
+    fast_sampling=True,
     noise_schedule=np.linspace(1e-4, 0.05, 50).tolist(),                # diffwave
-    inference_noise_schedule=[0.0001, 0.001, 0.01, 0.05, 0.2, 0.35],
+    inference_noise_schedule=[0.0001, 0.001, 0.01, 0.05, 0.2, 0.5],
 
     # noise_schedule=np.linspace(1e-4, 0.035, 50).tolist(),             # cdiffuse
     # inference_noise_schedule=[0.0001, 0.001, 0.01, 0.05, 0.2, 0.35],
 
     # noise_schedule=np.linspace(1e-4, 0.02, 1000).tolist(),            # beats gan
-
+    # inference_noise_schedule=[0.0001, 0.001, 0.01, 0.05, 0.2, 0.5],
 
 
 )
