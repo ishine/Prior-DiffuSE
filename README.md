@@ -38,7 +38,7 @@
       ```python
       python main.py --asset <asset_name> --joint
       ```
-3. draw evaluated data include noisy audio, init_audio, predicted_audio, true_delta, predicted_delta
+3. draw evaluated data include noisy audio, init_audio, predicted_audio, true_delta, predicted_delta, save in the current floder
    ```python
       python main.py --asset <asset_name> -- retrain --draw
    ```
