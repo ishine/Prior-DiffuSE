@@ -23,8 +23,11 @@ class ComplexDDPMTrainer(object):
     def __init__(self, args, config):
         # self.maxd = 0 # 34.3
         # self.mind = 100 # 20
-        # self.c = 35
+        # self.piror_max = 0  # 3.93
+        # self.piror_min = 100 # -3.87
+        # self.c = 1
         self.c = 11
+        # self.c = 2/3
         # config
         self.args = deepcopy(args)
         self.config = deepcopy(config)
@@ -88,11 +91,15 @@ class ComplexDDPMTrainer(object):
             pretrained_data = torch.load(os.path.join(self.args.checkpoint, 'best_checkpoint.pth'))
             self.model.load_state_dict(pretrained_data[0])
             self.optimizer.load_state_dict(pretrained_data[1])
-            self.model_ddpm.load_state_dict(pretrained_data[2])
-            self.optimizer_ddpm.load_state_dict(pretrained_data[3])
+            if self.args.draw or self.args.joint:
+                self.model_ddpm.load_state_dict(pretrained_data[2])
+                self.optimizer_ddpm.load_state_dict(pretrained_data[3])
 
         '''logger'''
         wandb.watch(self.model, log="all")
+
+
+
 
     def inference_schedule(self, fast_sampling=False):
         """
@@ -147,6 +154,115 @@ class ComplexDDPMTrainer(object):
 
         return alpha, beta, alpha_cum, sigmas, T
 
+    def draw_audio(self):
+        self.model.eval()
+        self.model_ddpm.eval()
+        alpha, beta, alpha_cum, sigmas, T = self.inference_schedule(fast_sampling=self.params.fast_sampling)
+
+        with torch.no_grad():
+            for batch in tqdm(self.cv_dataloader):
+                batch_feat = batch.feats.cuda()
+                batch_label = batch.labels.cuda()
+                # print(batch_label)
+                '''four approaches for feature compression'''
+                noisy_phase = torch.atan2(batch_feat[:, -1, :, :], batch_feat[:, 0, :, :])  # [B, 1, T, F]
+                clean_phase = torch.atan2(batch_label[:, -1, :, :], batch_label[:, 0, :, :])
+
+                if self.config.train.feat_type == 'normal':
+                    batch_feat, batch_label = torch.norm(batch_feat, dim=1), torch.norm(batch_label, dim=1)
+                elif self.config.train.feat_type == 'sqrt':
+                    batch_feat, batch_label = (torch.norm(batch_feat, dim=1)) ** 0.5, (
+                        torch.norm(batch_label, dim=1)) ** 0.5
+                elif self.config.train.feat_type == 'cubic':
+                    batch_feat, batch_label = (torch.norm(batch_feat, dim=1)) ** 0.3, (
+                        torch.norm(batch_label, dim=1)) ** 0.3
+                elif self.config.train.feat_type == 'log_1x':
+                    batch_feat, batch_label = torch.log(torch.norm(batch_feat, dim=1) + 1), \
+                                              torch.log(torch.norm(batch_label, dim=1) + 1)
+                if self.config.train.feat_type in ['normal', 'sqrt', 'cubic', 'log_1x']:
+                    batch_feat = torch.stack(
+                        (batch_feat * torch.cos(noisy_phase), batch_feat * torch.sin(noisy_phase)),
+                        # [B, 2, T, F]
+                        dim=1)
+                    batch_label = torch.stack(
+                        (batch_label * torch.cos(clean_phase), batch_label * torch.sin(clean_phase)),
+                        dim=1)
+
+                '''evaluation'''
+                init_audio = self.model(batch_feat)  # [B, 2, T, F]
+                init_audio /= self.c
+                if self.deltamu:
+                    audio = torch.randn_like(init_audio) + init_audio
+                else:
+                    audio = torch.randn_like(init_audio)  # XT = N(0, I),  [N, 2, T, F]
+                N = audio.shape[0]
+                gamma = [0 for i in alpha]  # the first 2 num didn't use
+                for n in range(len(alpha)):
+                    gamma[n] = sigmas[n]  # beta^tilde
+                # print(gamma)    #[0.715, 0.0095, 0.031, 0.095, 0.220, 0.412]
+                gamma[0] = 0.2  # beta^tilde_0 = 0.2
+                # print("gamma",gamma)
+                for n in range(len(alpha) - 1, -1, -1):
+                    c1 = 1 / alpha[n] ** 0.5  # c1 in mu equation
+                    c2 = beta[n] / (1 - alpha_cum[n]) ** 0.5  # c2 in mu equation
+                    if self.pirorgrad:
+                        predicted_noise = self.model_ddpm(audio, init_audio,
+                                                          torch.tensor([T[n]], device=audio.device).repeat(N))
+                    elif self.deltamu:
+                        predicted_noise = self.model_ddpm(audio, torch.tensor([T[n]], device=audio.device).repeat(N))
+                    else:
+                        predicted_noise = self.model_ddpm(audio, init_audio,  # z_theta(x_t, condition, t)
+                                                          torch.tensor([T[n]], device=audio.device).repeat(N))
+                    audio = c1 * (audio - c2 * predicted_noise)  # mu_theta(x_t, z_theta)
+                    if n > 0:
+                        noise = torch.randn_like(audio)
+                        sigma = gamma[n]  # sigma = gamma[n]
+                        newsigma = max(0, sigma - c1 * gamma[n])  # ???
+                        audio += newsigma * noise  # x_t-1 = mu_theta + beta^tilde * epsilon
+                if self.pirorgrad:
+                    audio += init_audio
+                audio *= self.c
+                init_audio *= self.c
+                '''plot batch_label, init_audio, predicted'''
+                for i in range(N):
+                    print("________________________________________________________________")
+                    print("batch_label", torch.max(batch_label[i][0]/self.c), torch.min(batch_label[i][0]/self.c))
+                    # print("________________________________________________________________")
+                    print("init_audio", torch.max(init_audio[i][0]/self.c), torch.min(init_audio[i][0]/self.c))
+                    # print("________________________________________________________________")
+                    print("true-delta", torch.max(batch_label[i][0]/self.c-init_audio[i][0]/self.c), torch.min(batch_label[i][0]/self.c-init_audio[i][0]/self.c))
+                    # print("________________________________________________________________")
+                    print("predicted-delta", torch.max(audio[i][0]/self.c-init_audio[i][0]/self.c), torch.min(audio[i][0]/self.c-init_audio[i][0]/self.c))
+                    print("________________________________________________________________")
+                    fig, ax = plt.subplots(1,6, constrained_layout=True, figsize=(20,8), dpi=300)
+
+                    pcm = ax[0].matshow((batch_feat[i][0] / self.c).cpu().numpy())
+                    ax[0].set_title("noisy_audio_" + str(i))
+                    fig.colorbar(pcm, ax=ax[0], shrink=0.6)
+
+                    pcm = ax[1].matshow((batch_label[i][0]/self.c).cpu().numpy())
+                    ax[1].set_title("label_audio_" + str(i))
+                    fig.colorbar(pcm, ax=ax[1], shrink=0.6)
+
+                    pcm = ax[2].matshow((init_audio[i][0]/self.c).cpu().numpy())
+                    ax[2].set_title("init_audio_" + str(i))
+                    fig.colorbar(pcm, ax=ax[2], shrink=0.6)
+
+                    pcm = ax[3].matshow((audio[i][0]/ self.c).cpu().numpy())
+                    ax[3].set_title("predicted_audio_" + str(i))
+                    fig.colorbar(pcm, ax=ax[3], shrink=0.6)
+
+                    pcm = ax[4].matshow((batch_label[i][0]/self.c).cpu().numpy() - (init_audio[i][0]/self.c).cpu().numpy())
+                    ax[4].set_title("true_delta_" + str(i))
+                    fig.colorbar(pcm, ax=ax[4], shrink=0.6)
+
+                    pcm = ax[5].matshow((audio[i][0]/self.c).cpu().numpy() - (init_audio[i][0]/self.c).cpu().numpy())
+                    ax[5].set_title("predicted_delta_" + str(i))
+                    fig.colorbar(pcm, ax=ax[5], shrink=0.6)
+
+                    fig.savefig("audio"+str(i)+"(c="+str(self.c)+")")
+                exit()
+
     def train_ddpm(self, max_steps=None):
         torch.backends.cudnn.enabled = True
 
@@ -156,21 +272,23 @@ class ComplexDDPMTrainer(object):
         cv_no_impv = 0
         harving = False
 
-        for epoch in range(self.config.train.n_epochs):
-            # alpha, beta, alpha_cum, sigmas, T = self.inference_schedule(fast_sampling=self.params.fast_sampling)
-            # exit()
-            logging.info(f'Epoch {epoch}')
+        '''draw from best ckp'''
+        if self.args.draw:
+            self.draw_audio()
+            exit()
 
-            '''training'''
-            # self.model_ddpm.train()
-            # self.model.train()
-            # for features in tqdm(self.tr_dataloader):
-            #     if max_steps is not None and self.step >= max_steps:
-            #         return
-            #     loss = self.train_step(features)
-            #     self.step += 1
-            #     if torch.isnan(loss).any():
-            #         raise RuntimeError(f'Detected NaN loss at step {self.step}.')
+        '''training'''
+        for epoch in range(self.config.train.n_epochs):
+            logging.info(f'Epoch {epoch}')
+            self.model_ddpm.train()
+            self.model.train()
+            for features in tqdm(self.tr_dataloader):
+                if max_steps is not None and self.step >= max_steps:
+                    return
+                loss = self.train_step(features)
+                self.step += 1
+                if torch.isnan(loss).any():
+                    raise RuntimeError(f'Detected NaN loss at step {self.step}.')
 
             '''evaluation after an epoch'''
             self.model.eval()
@@ -214,18 +332,13 @@ class ComplexDDPMTrainer(object):
                     '''evaluation'''
                     init_audio = self.model(batch_feat)  # [B, 2, T, F]
                     init_audio /= self.c
-
-                    if self.pirorgrad:
-                        init_audio = batch_label/self.c - init_audio    # max ~= 1.8 min ~= -1.7
+                    # print( batch_label[0][0]/self.c)
+                    # print( init_audio[0][0])    # 矩阵最后几行值相同且与label不同
+                    # exit()
                     if self.deltamu:
                         audio = torch.randn_like(init_audio) + init_audio
                     else:
                         audio = torch.randn_like(init_audio)                                                        # XT = N(0, I),  [N, 2, T, F]
-                    for i in range(8):
-                        # print("________________________________________________________________")
-                        # print("batch_label", torch.max(batch_label), torch.min(batch_label))
-                        print("________________________________________________________________")
-                        print("init_audio", torch.max(init_audio[i]), torch.min(init_audio[i]))
                     N = audio.shape[0]
                     gamma = [0 for i in alpha]                                                                  # the first 2 num didn't use
                     for n in range(len(alpha)):
@@ -268,27 +381,41 @@ class ComplexDDPMTrainer(object):
                     '''plot batch_label, init_audio, predicted'''
                     # for i in range(N):
                     #     print("________________________________________________________________")
-                    #     print("batch_label", torch.max(batch_label), torch.min(batch_label))
+                    #     print("batch_label", torch.max(batch_label[i][0]/self.c), torch.min(batch_label[i][0]/self.c))
+                    #     # print("________________________________________________________________")
+                    #     print("init_audio", torch.max(init_audio[i][0]/self.c), torch.min(init_audio[i][0]/self.c))
+                    #     # print("________________________________________________________________")
+                    #     print("true-delta", torch.max(batch_label[i][0]/self.c-init_audio[i][0]/self.c), torch.min(batch_label[i][0]/self.c-init_audio[i][0]/self.c))
+                    #     # print("________________________________________________________________")
+                    #     print("predicted-delta", torch.max(audio[i][0]/self.c-init_audio[i][0]/self.c), torch.min(audio[i][0]/self.c-init_audio[i][0]/self.c))
                     #     print("________________________________________________________________")
-                    #     print("init_audio", torch.max(init_audio[i]), torch.min(init_audio[i]))
-                    #     print("________________________________________________________________")
-                    #     print("true-delta", torch.max(audio), torch.min(audio))
-                    #     print("________________________________________________________________")
-                    #     print("predicted-delta", torch.max(audio), torch.min(audio))
-                    #     print("________________________________________________________________")
-                    #     fig, ax = plt.subplots(2, 2, figsize=(12,8))
-                    #     ax[0,0].matshow(batch_label[i][0].cpu().numpy())
+                    #     fig, ax = plt.subplots(1,6, constrained_layout=True, figsize=(20,8), dpi=300)
                     #
-                    #     ax[0,0].set_title("batch_label_" + str(i))
-                    #     ax[0,1].matshow(init_audio[i][0].cpu().numpy())
-                    #     ax[0,1].set_title("init_audio_" + str(i))
-                    #     ax[1,0].matshow(batch_label[i][0].cpu().numpy() - init_audio[i][0].cpu().numpy())
-                    #     ax[1,0].set_title("true-delta_" + str(i))
-                    #     im = ax[1,1].matshow(audio[i][0].cpu().numpy() - init_audio[i][0].cpu().numpy())
-                    #     ax[1,1].set_title("predicted-delta_" + str(i))
-                    #     fig.colorbar(im, ax=[ax[0,0], ax[1,0], ax[0,1], ax[1,1]])
-                    #     fig.tight_layout()
-                    #     fig.savefig("audio"+str(i), dpi=1000)
+                    #     pcm = ax[0].matshow((batch_feat[i][0] / self.c).cpu().numpy())
+                    #     ax[0].set_title("noisy_audio_" + str(i))
+                    #     fig.colorbar(pcm, ax=ax[0], shrink=0.6)
+                    #
+                    #     pcm = ax[1].matshow((batch_label[i][0]/self.c).cpu().numpy())
+                    #     ax[1].set_title("label_audio_" + str(i))
+                    #     fig.colorbar(pcm, ax=ax[1], shrink=0.6)
+                    #
+                    #     pcm = ax[2].matshow((init_audio[i][0]/self.c).cpu().numpy())
+                    #     ax[2].set_title("init_audio_" + str(i))
+                    #     fig.colorbar(pcm, ax=ax[2], shrink=0.6)
+                    #
+                    #     pcm = ax[3].matshow((audio[i][0]/ self.c).cpu().numpy())
+                    #     ax[3].set_title("predicted_audio_" + str(i))
+                    #     fig.colorbar(pcm, ax=ax[3], shrink=0.6)
+                    #
+                    #     pcm = ax[4].matshow((batch_label[i][0]/self.c).cpu().numpy() - (init_audio[i][0]/self.c).cpu().numpy())
+                    #     ax[4].set_title("true_delta_" + str(i))
+                    #     fig.colorbar(pcm, ax=ax[4], shrink=0.6)
+                    #
+                    #     pcm = ax[5].matshow((audio[i][0]/self.c).cpu().numpy() - (init_audio[i][0]/self.c).cpu().numpy())
+                    #     ax[5].set_title("predicted_delta_" + str(i))
+                    #     fig.colorbar(pcm, ax=ax[5], shrink=0.6)
+                    #
+                    #     fig.savefig("audio"+str(i))
                     # exit()
                     '''metrics compute'''
                     # x
@@ -378,10 +505,9 @@ class ComplexDDPMTrainer(object):
             ]
             torch.save(states, os.path.join(self.args.checkpoint, f'checkpoint_{epoch}.pth'))
 
-
     def train_step(self, features):
         self.optimizer_ddpm.zero_grad()
-        # self.optimizer.zero_grad()
+        self.optimizer.zero_grad()
         batch_feat = features.feats.cuda()
         batch_label = features.labels.cuda()
         batch_frame_num_list = features.frame_num_list
@@ -412,7 +538,12 @@ class ComplexDDPMTrainer(object):
                 dim=1)
         # print("batch_feat: ", batch_feat.shape)
         '''discriminative model'''
-        init_audio = self.model(batch_feat).detach() # [8, 2, 301, 161]
+        if self.args.joint:
+            init_audio = self.model(batch_feat) # [8, 2, 301, 161]
+            loss_dis = eval(self.config.train.loss)(init_audio, batch_label, batch_frame_num_list)
+        else:
+            init_audio = self.model(batch_feat).detach() # [8, 2, 301, 161]
+            loss_dis = 0
         # 计算 model 参数量 model 总参数数量和：1662565 model_ddpm 总参数数量和：1258371
         # params = list(self.model.parameters())
         # k = 0
@@ -436,8 +567,7 @@ class ComplexDDPMTrainer(object):
         # print("model_ddpm 总参数数量和：" + str(k))
         # exit(0)
 
-        # loss_dis = eval(self.config.train.loss)(init_audio, batch_label, batch_frame_num_list)
-        loss_dis = 0
+
 
         '''ddpm'''
         batch_label /= self.c
@@ -468,43 +598,17 @@ class ComplexDDPMTrainer(object):
             noisy_audio = noise_scale_sqrt * (batch_label) + (1.0 - noise_scale) ** 0.5 * noise
             predicted = self.model_ddpm(noisy_audio, init_audio, t)  # epsilon^hat
 
-        # self.maxd = self.maxd if self.maxd > torch.max(batch_label) else torch.max(batch_label)
-        # self.mind = self.mind if self.mind < torch.min(batch_label) else torch.min(batch_label)
-        # print("max:", self.maxd, "min:", self.mind)
-        # for i in range(N):
-            # print("t", t[i])
-            # print("________________________________________________________________")
-            # print("batch_label", torch.max(batch_label[i]), torch.min(batch_label[i]))
-        #     # plot_stft(batch_label[i].cpu(), features.wav_len_list[i], title="batch_label")
-        #     print("________________________________________________________________")
-        #     print("noise_scale_sqrt", noise_scale_sqrt)
-        #     print("noisy_audio", torch.max(noisy_audio[i]), torch.min(noisy_audio[i]))
-        #
-        #     plt.matshow(noisy_audio[i][0].cpu().numpy())
-        #     plt.colorbar()
-        #     plt.show()
-        #     # plot_stft(noisy_audio[i].cpu(), features.wav_len_list[i], title="noisy_audio")
-        #     print("________________________________________________________________")
-        #     print("init_audio", torch.max(init_audio[i]), torch.min(init_audio[i]))
-        #     # plot_stft(init_audio[i].cpu(), features.wav_len_list[i], title="init_audio")
-        #     print("________________________________________________________________")
-        #     print("predicted", torch.max(predicted), torch.min(predicted))
-        #     # plot_stft(predicted[i].detach().cpu(), features.wav_len_list[i], title="predicted")
-        #     print("________________________________________________________________")
-        #     # print("loss_ddpm", loss_ddpm)
-        #     print("________________________________________________________________")
 
-        # loss_ddpm = self.loss_fn_eva(noise, predicted)
         loss_ddpm = eval(self.config.train.loss)(predicted, noise , batch_frame_num_list)
 
-        # loss = self.config.train.lam * loss_ddpm + loss_dis
-        loss = loss_ddpm
+        loss = self.config.train.lam * loss_ddpm + loss_dis
+
 
         wandb.log(
             {
-             # 'dis_loss': loss1.item(),
+             'dis_loss': loss_dis.item(),
              'ddpm_loss': loss_ddpm.item(),
-             # 'loss_sum': loss.item()
+             'loss_sum': loss.item()
             }
         )
         # loss = loss1
@@ -512,12 +616,12 @@ class ComplexDDPMTrainer(object):
         #     {'loss_sum': loss.item()}
         # )
         loss.backward()
-        # self.optimizer.step()
+        if self.args.joint:
+            self.optimizer.step()
         self.optimizer_ddpm.step()
 
 
         return loss
-
 
     def train(self):
         prev_cv_loss = float("inf")
