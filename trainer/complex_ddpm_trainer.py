@@ -476,11 +476,20 @@ class ComplexDDPMTrainer(object):
                     cv_no_impv = 0
 
             if harving == True:
-                optim_state = self.optimizer_ddpm.state_dict()
+                # dis model
+                optim_state = self.optimizer.state_dict()
                 for i in range(len(optim_state['param_groups'])):
                     optim_state['param_groups'][i]['lr'] = optim_state['param_groups'][i]['lr'] / 2.0
                 self.optimizer.load_state_dict(optim_state)
-                logging.info('Learning rate adjusted to %5f' % (optim_state['param_groups'][0]['lr']))
+                logging.info('Learning rate of dis model adjusted to %5f' % (optim_state['param_groups'][0]['lr']))
+
+                # ddpm
+                optim_state = self.optimizer_ddpm.state_dict()
+                for i in range(len(optim_state['param_groups'])):
+                    optim_state['param_groups'][i]['lr'] = optim_state['param_groups'][i]['lr'] / 2.0
+                self.optimizer_ddpm.load_state_dict(optim_state)
+                logging.info('Learning rate of ddpm adjusted to %5f' % (optim_state['param_groups'][0]['lr']))
+
                 harving = False
             prev_cv_loss = cv_loss
 
@@ -539,8 +548,9 @@ class ComplexDDPMTrainer(object):
         # print("batch_feat: ", batch_feat.shape)
         '''discriminative model'''
         if self.args.joint:
-            init_audio = self.model(batch_feat) # [8, 2, 301, 161]
-            loss_dis = eval(self.config.train.loss)(init_audio, batch_label, batch_frame_num_list)
+            init_audio_ = self.model(batch_feat) # [8, 2, 301, 161]
+            loss_dis = eval(self.config.train.loss)(init_audio_, batch_label, batch_frame_num_list)
+            init_audio = self.model(batch_feat).detach()
         else:
             init_audio = self.model(batch_feat).detach() # [8, 2, 301, 161]
             loss_dis = 0
@@ -616,9 +626,9 @@ class ComplexDDPMTrainer(object):
         #     {'loss_sum': loss.item()}
         # )
         loss.backward()
+        self.optimizer_ddpm.step()
         if self.args.joint:
             self.optimizer.step()
-        self.optimizer_ddpm.step()
 
 
         return loss
