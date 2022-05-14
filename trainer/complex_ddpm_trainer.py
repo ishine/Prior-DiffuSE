@@ -13,6 +13,7 @@ import wandb
 from tqdm import tqdm
 from scripts.draw_spectrum import plot_stft
 import matplotlib.pyplot as plt
+import torch.nn.functional as F
 from plotnine import *
 import pandas as pd
 
@@ -280,16 +281,19 @@ class ComplexDDPMTrainer(object):
         '''training'''
         for epoch in range(self.config.train.n_epochs):
             logging.info(f'Epoch {epoch}')
-            self.model_ddpm.train()
-            self.model.train()
-            for features in tqdm(self.tr_dataloader):
-                if max_steps is not None and self.step >= max_steps:
-                    return
-                loss = self.train_step(features)
-                self.step += 1
-                if torch.isnan(loss).any():
-                    raise RuntimeError(f'Detected NaN loss at step {self.step}.')
 
+            if self.args.eval is False:
+                self.model_ddpm.train()
+                self.model.train()
+                for features in tqdm(self.tr_dataloader):
+                    self.model_ddpm.train()
+                    self.model.train()
+                    if max_steps is not None and self.step >= max_steps:
+                        return
+                    loss = self.train_step(features)
+                    self.step += 1
+                    if torch.isnan(loss).any():
+                        raise RuntimeError(f'Detected NaN loss at step {self.step}.')
             '''evaluation after an epoch'''
             self.model.eval()
             self.model_ddpm.eval()
@@ -339,6 +343,11 @@ class ComplexDDPMTrainer(object):
                         audio = torch.randn_like(init_audio) + init_audio
                     else:
                         audio = torch.randn_like(init_audio)                                                        # XT = N(0, I),  [N, 2, T, F]
+                    if self.args.sigma:
+                        tmp = torch.flatten(torch.abs(init_audio), start_dim=2)
+                        tmp /= torch.max(tmp, dim=2, keepdim=True).values
+                        mask = tmp.view(batch_label.shape)
+                        audio = audio * mask
                     N = audio.shape[0]
                     gamma = [0 for i in alpha]                                                                  # the first 2 num didn't use
                     for n in range(len(alpha)):
@@ -371,6 +380,8 @@ class ComplexDDPMTrainer(object):
                             noise = torch.randn_like(audio)
                             sigma = gamma[n]                                                                    # sigma = gamma[n]
                             newsigma = max(0, sigma - c1 * gamma[n])                                            # ???
+                            if self.args.sigma:
+                                noise = noise * mask
                             audio += newsigma * noise                                                           # x_t-1 = mu_theta + beta^tilde * epsilon
 
                         # audio = torch.clamp(audio, -35/11, 35/11) # Diffuse/ILVR used after preprocess
@@ -422,7 +433,7 @@ class ComplexDDPMTrainer(object):
                     batch_loss = com_mse_loss(audio, batch_label ,batch.frame_num_list)
                     batch_result = compare_complex(audio, batch_label, batch.frame_num_list,
                                                    feat_type=self.config.train.feat_type)  # compute evaluate metrics
-                    print(batch_result)
+                    # print(batch_result)
                     all_loss_list.append(batch_loss.item())
                     all_csig_list.append(batch_result[0])
                     all_cbak_list.append(batch_result[1])
@@ -461,7 +472,8 @@ class ComplexDDPMTrainer(object):
                         # 'test_mean_stoi_init': np.mean(all_stoi_list_init)
                     }
                 )
-
+            if self.args.eval:
+                exit()
             cv_loss = np.mean(all_loss_list)
             '''Adjust the learning rate and early stop'''
             if self.config.optim.half_lr > 1:
@@ -553,7 +565,7 @@ class ComplexDDPMTrainer(object):
             init_audio = self.model(batch_feat).detach()
         else:
             init_audio = self.model(batch_feat).detach() # [8, 2, 301, 161]
-            loss_dis = 0
+            loss_dis = torch.tensor(0)
         # 计算 model 参数量 model 总参数数量和：1662565 model_ddpm 总参数数量和：1258371
         # params = list(self.model.parameters())
         # k = 0
@@ -582,8 +594,8 @@ class ComplexDDPMTrainer(object):
         '''ddpm'''
         batch_label /= self.c
         init_audio /= self.c
+        N = batch_label.shape[0]  # Batch size
 
-        N  = batch_label.shape[0]  # Batch size
         device = batch_label.device
         self.noise_level = self.noise_level.to(device)                                  # alpha_bar     [1000]
 
@@ -592,7 +604,11 @@ class ComplexDDPMTrainer(object):
         noise_scale = self.noise_level[t].unsqueeze(1).unsqueeze(2).unsqueeze(3)        # alpha_bar_t       [N, 1, 1, 1]
         noise_scale_sqrt = noise_scale ** 0.5                                           # sqrt(alpha_bar_t) [N, 1, 1, 1]
         noise = torch.randn_like(batch_label)                                            # epsilon           [N, 2, T, F]
-
+        if self.args.sigma:
+            tmp = torch.flatten(torch.abs(init_audio), start_dim=2)
+            tmp /= torch.max(tmp, dim=2, keepdim=True).values
+            mask = tmp.view(batch_label.shape)
+            noise = noise * mask
         if self.pirorgrad:
             # for i in range(N):
             #     plt.matshow((batch_label-init_audio)[i][0].cpu().numpy())
@@ -626,9 +642,9 @@ class ComplexDDPMTrainer(object):
         #     {'loss_sum': loss.item()}
         # )
         loss.backward()
-        self.optimizer_ddpm.step()
         if self.args.joint:
             self.optimizer.step()
+        self.optimizer_ddpm.step()
 
 
         return loss

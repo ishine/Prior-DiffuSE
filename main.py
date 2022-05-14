@@ -30,6 +30,8 @@ def parse_args_and_config():
     parser.add_argument('--generate', action='store_true', help='Whether to test the model')
     parser.add_argument('--retrain', action='store_true', help='w')
     parser.add_argument('--joint', action='store_true', help='w')
+    parser.add_argument('--eval', action='store_true', help='w')
+    parser.add_argument('--sigma', action='store_true', help='w')
     parser.add_argument('--draw', action='store_true', help='draw from best checkpoint')
     args = parser.parse_args()
     args.log = os.path.join(args.assets, 'log', args.doc)
