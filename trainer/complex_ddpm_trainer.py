@@ -14,8 +14,8 @@ from tqdm import tqdm
 from scripts.draw_spectrum import plot_stft
 import matplotlib.pyplot as plt
 import torch.nn.functional as F
-from plotnine import *
-import pandas as pd
+# from plotnine import *
+# import pandas as pd
 
 wandb.init(project="ddpm")
 
@@ -336,6 +336,7 @@ class ComplexDDPMTrainer(object):
                     '''evaluation'''
                     init_audio = self.model(batch_feat)  # [B, 2, T, F]
                     init_audio /= self.c
+                    batch_feat /= self.c
                     # print( batch_label[0][0]/self.c)
                     # print( init_audio[0][0])    # 矩阵最后几行值相同且与label不同
                     # exit()
@@ -346,6 +347,7 @@ class ComplexDDPMTrainer(object):
                     if self.args.sigma:
                         tmp = torch.flatten(torch.abs(init_audio), start_dim=2)
                         tmp /= torch.max(tmp, dim=2, keepdim=True).values
+                        tmp = tmp / 2 + 0.5
                         mask = tmp.view(batch_label.shape)
                         audio = audio * mask
                     N = audio.shape[0]
@@ -363,7 +365,7 @@ class ComplexDDPMTrainer(object):
                         elif self.deltamu:
                             predicted_noise = self.model_ddpm(audio, torch.tensor([T[n]], device=audio.device).repeat(N))
                         else:
-                            predicted_noise = self.model_ddpm(audio, init_audio,                                    # z_theta(x_t, condition, t)
+                            predicted_noise = self.model_ddpm(audio, batch_feat,                                    # z_theta(x_t, condition, t)
                                                           torch.tensor([T[n]], device=audio.device).repeat(N))
                         # print("predicted_noise", predicted_noise.shape)
                         # audio = c1 * ((1-gamma[n])*mu+gamma[n]* (noisy_audio-init_audio))  # 插值
@@ -594,6 +596,7 @@ class ComplexDDPMTrainer(object):
         '''ddpm'''
         batch_label /= self.c
         init_audio /= self.c
+        # batch_feat /= self.c
         N = batch_label.shape[0]  # Batch size
 
         device = batch_label.device
@@ -607,8 +610,11 @@ class ComplexDDPMTrainer(object):
         if self.args.sigma:
             tmp = torch.flatten(torch.abs(init_audio), start_dim=2)
             tmp /= torch.max(tmp, dim=2, keepdim=True).values
+            tmp = tmp / 2 + 0.5
             mask = tmp.view(batch_label.shape)
             noise = noise * mask
+            # print(torch.max(mask), torch.min(mask))
+            # exit()
         if self.pirorgrad:
             # for i in range(N):
             #     plt.matshow((batch_label-init_audio)[i][0].cpu().numpy())
@@ -622,7 +628,7 @@ class ComplexDDPMTrainer(object):
             predicted = self.model_ddpm(noisy_audio, t)  # epsilon^hat
         else:
             noisy_audio = noise_scale_sqrt * (batch_label) + (1.0 - noise_scale) ** 0.5 * noise
-            predicted = self.model_ddpm(noisy_audio, init_audio, t)  # epsilon^hat
+            predicted = self.model_ddpm(noisy_audio, batch_feat, t)  # epsilon^hat
 
 
         loss_ddpm = eval(self.config.train.loss)(predicted, noise , batch_frame_num_list)
