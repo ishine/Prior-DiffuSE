@@ -4,15 +4,20 @@ import os
 import numpy as np
 
 os.environ['CUDA_VISIBLE_DEVICES'] = '0'
+Linear = nn.Linear
+ConvTranspose2d = nn.ConvTranspose2d
 
 '''
 A UNet-typed model for Diffusion-SE.
 '''
 
 
-class DiffUNet(nn.Module):
-    def __init__(self):
-        super(DiffUNet, self).__init__()
+class Nocon(nn.Module):
+    def __init__(self, params):
+        super(Nocon, self).__init__()
+        self.params = params
+        self.time_embedding = TimeEmbedding(len(params.noise_schedule))  # oom!
+
         self.en = Encoder()
         self.de_real = Decoder()
         self.de_imag = Decoder()
@@ -20,18 +25,57 @@ class DiffUNet(nn.Module):
                                   TCM(),
                                   TCM())
 
-    def forward(self, x):
-        x, en_list = self.en(x)  # [b,c,t,f_], c = 64, f_ = 4
+    def forward(self, x, t):
+        t = self.time_embedding(t)
+
+        x, en_list = self.en(x, t)  # [b,c,t,f_], c = 64, f_ = 4
         x = x.permute(0, 2, 1, 3)  # [b,t,c,f_]
         x = x.reshape(x.size()[0], x.size()[1], -1).permute(0, 2, 1)  # [b, c * f_, t]
         x = self.TCMs(x).permute(0, 2, 1)   # [b, t, c * f_]
         x = x.reshape(x.size()[0], x.size()[1], 64, 4)  # [b, t, c, f_]
         x = x.permute(0, 2, 1, 3)   # [b,c,t,f_], c = 64, f_ = 4
-        x_real = self.de_real(x, en_list)
-        x_imag = self.de_imag(x, en_list)
+        x_real = self.de_real(x, en_list, t)
+        x_imag = self.de_imag(x, en_list, t)
         out = torch.cat((x_real, x_imag), dim=1)
         return out
 
+def silu(x):
+  return x * torch.sigmoid(x)
+
+class TimeEmbedding(nn.Module): # from diffwave
+  def __init__(self, max_steps):
+    super().__init__()
+    self.register_buffer('embedding', self._build_embedding(max_steps), persistent=False)
+    self.projection1 = Linear(128, 512)
+    self.projection2 = Linear(512, 512)
+
+  def forward(self, diffusion_step):
+    if diffusion_step.dtype in [torch.int32, torch.int64]:
+      x = self.embedding[diffusion_step]
+    else:
+      x = self._lerp_embedding(diffusion_step)
+    x = self.projection1(x)
+    x = silu(x)
+    x = self.projection2(x)
+    x = silu(x)
+    return x
+
+  def _lerp_embedding(self, t):
+    # print(t.shape)
+    # print(self.embedding.shape) # [50, 128]
+    low_idx = torch.floor(t).long()     # [8]
+    high_idx = torch.ceil(t).long()
+    low = self.embedding[low_idx]       # [8, 128]
+    high = self.embedding[high_idx]
+    return low + (high - low) * (t - low_idx).unsqueeze(1)   # [8, 128]
+
+  def _build_embedding(self, max_steps):
+    steps = torch.arange(max_steps).unsqueeze(1)  # [T,1]
+    dims = torch.arange(64).unsqueeze(0)          # [1,64]
+    table = steps * 10.0**(dims * 4.0 / 63.0)     # [T,64]
+    table = torch.cat([torch.sin(table), torch.cos(table)], dim=1)
+    print("t", table.shape)
+    return table
 
 class Encoder(nn.Module):
     def __init__(self):
@@ -44,6 +88,13 @@ class Encoder(nn.Module):
         self.conv3 = BiConvGLU(in_channels=64, out_channels=64, kernel_size=(2, 3), stride=(1, 2))
         self.conv4 = BiConvGLU(in_channels=64, out_channels=64, kernel_size=(2, 3), stride=(1, 2))
         self.conv5 = BiConvGLU(in_channels=64, out_channels=64, kernel_size=(2, 3), stride=(1, 2))
+
+        # t_projection
+        self.tp1 = Linear(512, 2)
+        self.tp2 = Linear(512, 64)
+        self.tp3 = Linear(512, 64)
+        self.tp4 = Linear(512, 64)
+        self.tp5 = Linear(512, 64)
         self.en1 = nn.Sequential(
             nn.BatchNorm2d(64),
             nn.PReLU()
@@ -65,26 +116,26 @@ class Encoder(nn.Module):
             nn.PReLU()
         )
 
-    def forward(self, x):   # [b, 2, t, f]
+    def forward(self, x, t):   # [b, 2, t, f]
         en_list = []
         x = self.pad1(x)    # [b, 2, t+1, f]
-        x = self.conv1(x)   # [b, 64, t, (f-5)/2 + 1]
+        x = self.conv1(x + self.tp1(t).unsqueeze(-1).unsqueeze(-1))   # [b, 64, t, (f-5)/2 + 1]
         x = self.en1(x)
         en_list.append(x)
         x = self.pad1(x)
-        x = self.conv2(x)   # [b, 64, t, (f_-3)/2 + 1]
+        x = self.conv2(x + self.tp2(t).unsqueeze(-1).unsqueeze(-1))   # [b, 64, t, (f_-3)/2 + 1]
         x = self.en2(x)
         en_list.append(x)
         x = self.pad1(x)
-        x = self.conv3(x)   # [b, 64, t, (f_-3)/2 + 1]
+        x = self.conv3(x + self.tp3(t).unsqueeze(-1).unsqueeze(-1))   # [b, 64, t, (f_-3)/2 + 1]
         x = self.en3(x)
         en_list.append(x)
         x = self.pad1(x)
-        x = self.conv4(x)   # [b, 64, t, (f_-3)/2 + 1]
+        x = self.conv4(x + self.tp4(t).unsqueeze(-1).unsqueeze(-1))   # [b, 64, t, (f_-3)/2 + 1]
         x = self.en4(x)
         en_list.append(x)
         x = self.pad1(x)
-        x = self.conv5(x)   # [b, 64, t, (f_-3)/2 + 1]
+        x = self.conv5(x + self.tp5(t).unsqueeze(-1).unsqueeze(-1))   # [b, 64, t, (f_-3)/2 + 1]
         x = self.en5(x)
         en_list.append(x)
         return x, en_list
@@ -127,12 +178,12 @@ class Decoder(nn.Module):
             # nn.PReLU()
         )
 
-    def forward(self, x, x_list):   # [b,c,t,f_], c = 128, f_ = 4
-        x = self.de5(torch.cat((x, x_list[-1]), dim=1))     # [b,64,t-1,f_ * 2 + 1]
-        x = self.de4(torch.cat((x, x_list[-2]), dim=1))     # [b,64,t_ - 1,f_ * 2 + 1]
-        x = self.de3(torch.cat((x, x_list[-3]), dim=1))     # [b,64,t_ - 1,f_ * 2 + 1]
-        x = self.de2(torch.cat((x, x_list[-4]), dim=1))     # [b,64,t_ - 1,f_ * 2 + 1]
-        x = self.de1(torch.cat((x, x_list[-5]), dim=1))     # [b,64,t_ - 1,f_ * 2 + 3]
+    def forward(self, x, x_list, t):   # [b,c,t,f_], c = 128, f_ = 4
+        x = self.de5((torch.cat((x, x_list[-1]), dim=1), t))     # [b,64,t-1,f_ * 2 + 1]
+        x = self.de4((torch.cat((x, x_list[-2]), dim=1), t))     # [b,64,t_ - 1,f_ * 2 + 1]
+        x = self.de3((torch.cat((x, x_list[-3]), dim=1), t))     # [b,64,t_ - 1,f_ * 2 + 1]
+        x = self.de2((torch.cat((x, x_list[-4]), dim=1), t))     # [b,64,t_ - 1,f_ * 2 + 1]
+        x = self.de1((torch.cat((x, x_list[-5]), dim=1), t))     # [b,64,t_ - 1,f_ * 2 + 3]
         return x
 
 
@@ -253,6 +304,7 @@ class BiConvGLU(nn.Module):
 class BiConvTransGLU(nn.Module):
     def __init__(self, in_channels, out_channels, kernel_size, stride):
         super(BiConvTransGLU, self).__init__()
+        self.tp = Linear(512, in_channels)
         self.conv1 = nn.ConvTranspose2d(in_channels=in_channels, out_channels=32, kernel_size=(1, 1), stride=(1, 1))
         self.l = nn.ConvTranspose2d(in_channels=32, out_channels=32, kernel_size=kernel_size, stride=stride)
         self.l_conv = nn.ConvTranspose2d(in_channels=32, out_channels=32, kernel_size=(1, 1), stride=(1, 1))
@@ -262,7 +314,9 @@ class BiConvTransGLU(nn.Module):
         self.conv2 = nn.ConvTranspose2d(in_channels=32, out_channels=out_channels, kernel_size=(1, 1), stride=(1, 1))
 
     def forward(self, x):
-        x = self.conv1(x)
+        x, t = x
+        t = self.tp(t)
+        x = self.conv1(x + t.unsqueeze(-1).unsqueeze(-1))
         left = self.l(x)
         right = self.r(x)
         left_mask = self.Sigmoid(self.l_conv(left))

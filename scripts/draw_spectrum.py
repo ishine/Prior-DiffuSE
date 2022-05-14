@@ -26,6 +26,31 @@ def plot_specgram(wave, title="Spectrogram"):
     # plt.colorbar()
     plt.show()
 
+def plot_stft(spec, wav_len, title=None, ylabel="freq_bin", aspect="auto", xmax=None, path=None):
+    # feat_x: [2, f, t]
+
+    # plt.hist(feat_x[0] / 3, bins=100)
+    # plt.matshow(feat_x[0])
+    # plt.colorbar()
+    esti_mag, esti_phase = torch.norm(spec, dim=0), torch.atan2(spec[-1, :, :],
+                                                                  spec[0, :, :])
+
+    esti_mag = esti_mag ** 2
+    esti_com = torch.stack((esti_mag * torch.cos(esti_phase), esti_mag * torch.sin(esti_phase)), dim=0)
+    tf_esti = esti_com.permute(2, 1, 0).cpu()
+
+
+    fig, axs = plt.subplots(1, 2)
+    axs[0].set_title(title or "Spectrogram (db)")
+    axs[0].set_ylabel(ylabel)
+    axs[0].set_xlabel("frame")
+    im = axs[0].imshow(librosa.power_to_db(tf_esti_n[0].numpy()), origin="lower", aspect=aspect)
+    im2 = axs[1].imshow(librosa.power_to_db(tf_esti_n[1].numpy()), origin="lower", aspect=aspect)
+    if xmax:
+        axs[0].set_xlim((0, xmax))
+    fig.colorbar(im)
+    plt.savefig(title+'.png',dpi=300)
+
 
 def plot_wav(wave, title='Wav', path=None):
     c = np.sqrt(np.sum((wave ** 2)) / len(wave))
