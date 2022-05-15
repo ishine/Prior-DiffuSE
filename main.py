@@ -32,6 +32,7 @@ def parse_args_and_config():
     parser.add_argument('--joint', action='store_true', help='w')
     parser.add_argument('--eval', action='store_true', help='w')
     parser.add_argument('--sigma', action='store_true', help='w')
+    parser.add_argument('--noisy', action='store_true', help='w')
     parser.add_argument('--draw', action='store_true', help='draw from best checkpoint')
     args = parser.parse_args()
     args.log = os.path.join(args.assets, 'log', args.doc)

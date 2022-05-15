@@ -335,6 +335,7 @@ class ComplexDDPMTrainer(object):
 
                     '''evaluation'''
                     init_audio = self.model(batch_feat)  # [B, 2, T, F]
+                    batch_feat /= self.c
                     init_audio /= self.c
                     # print( batch_label[0][0]/self.c)
                     # print( init_audio[0][0])    # 矩阵最后几行值相同且与label不同
@@ -359,7 +360,10 @@ class ComplexDDPMTrainer(object):
                         c1 = 1 / alpha[n] ** 0.5                                                                # c1 in mu equation
                         c2 = beta[n] / (1 - alpha_cum[n]) ** 0.5                                                # c2 in mu equation
                         if self.pirorgrad:
-                            predicted_noise = self.model_ddpm(audio, init_audio, torch.tensor([T[n]], device=audio.device).repeat(N))
+                            if self.args.noisy:
+                                predicted_noise = self.model_ddpm(audio, batch_feat, torch.tensor([T[n]], device=audio.device).repeat(N))
+                            else:
+                                predicted_noise = self.model_ddpm(audio, init_audio, torch.tensor([T[n]], device=audio.device).repeat(N))
                         elif self.deltamu:
                             predicted_noise = self.model_ddpm(audio, torch.tensor([T[n]], device=audio.device).repeat(N))
                         else:
@@ -386,7 +390,10 @@ class ComplexDDPMTrainer(object):
 
                         # audio = torch.clamp(audio, -35/11, 35/11) # Diffuse/ILVR used after preprocess
                     if self.pirorgrad:
-                        audio += init_audio
+                        if self.args.noisy:
+                            audio += batch_feat
+                        else:
+                            audio += init_audio
                     audio *= self.c
                     init_audio *= self.c
                     '''plot batch_label, init_audio, predicted'''
@@ -566,6 +573,7 @@ class ComplexDDPMTrainer(object):
         else:
             init_audio = self.model(batch_feat).detach() # [8, 2, 301, 161]
             loss_dis = torch.tensor(0)
+        '''计算模型参数量'''
         # 计算 model 参数量 model 总参数数量和：1662565 model_ddpm 总参数数量和：1258371
         # params = list(self.model.parameters())
         # k = 0
@@ -591,7 +599,8 @@ class ComplexDDPMTrainer(object):
 
 
 
-        '''ddpm'''
+        '''DDPM'''
+        batch_feat /= self.c
         batch_label /= self.c
         init_audio /= self.c
         N = batch_label.shape[0]  # Batch size
@@ -610,22 +619,31 @@ class ComplexDDPMTrainer(object):
             mask = tmp.view(batch_label.shape)
             noise = noise * mask
         if self.pirorgrad:
-            # for i in range(N):
-            #     plt.matshow((batch_label-init_audio)[i][0].cpu().numpy())
-            #     plt.colorbar()
-            #     plt.savefig("batch_label-init_audio"+ str(i))
-            # exit()
-            noisy_audio = noise_scale_sqrt * (batch_label-init_audio) + (1.0 - noise_scale) ** 0.5 * noise  # pirorgrad
-            predicted = self.model_ddpm(noisy_audio, init_audio, t)  # epsilon^hat
+            if self.args.noisy:
+                noisy_audio = noise_scale_sqrt * (batch_label - batch_feat) + (
+                            1.0 - noise_scale) ** 0.5 * noise  # pirorgrad
+                predicted = self.model_ddpm(noisy_audio, batch_feat, t)  # epsilon^hat
+            else:
+                noisy_audio = noise_scale_sqrt * (batch_label-init_audio) + (1.0 - noise_scale) ** 0.5 * noise  # pirorgrad
+                predicted = self.model_ddpm(noisy_audio, init_audio, t)  # epsilon^hat
         elif self.deltamu:
             noisy_audio = noise_scale_sqrt * batch_label + (1.0 - noise_scale) ** 0.5 * (noise + init_audio)
             predicted = self.model_ddpm(noisy_audio, t)  # epsilon^hat
+        elif self.ourmethod:
+            noisy_audio = noise_scale_sqrt * (batch_label - init_audio) + (
+                        1.0 - noise_scale) ** 0.5 * noise  # pirorgrad
+            predicted = self.model_ddpm(noisy_audio, init_audio, t)
         else:
             noisy_audio = noise_scale_sqrt * (batch_label) + (1.0 - noise_scale) ** 0.5 * noise
             predicted = self.model_ddpm(noisy_audio, init_audio, t)  # epsilon^hat
 
-
-        loss_ddpm = eval(self.config.train.loss)(predicted, noise , batch_frame_num_list)
+        if self.args.sigma:
+            print(torch.any(torch.isnan(mask)))
+            # exit()
+            loss_ddpm = com_mse_sigma_loss(predicted, noise, batch_frame_num_list, mask)
+            print(torch.any(torch.isnan(loss_ddpm)))
+        else:
+            loss_ddpm = eval(self.config.train.loss)(predicted, noise , batch_frame_num_list)
 
         loss = self.config.train.lam * loss_ddpm + loss_dis
 
