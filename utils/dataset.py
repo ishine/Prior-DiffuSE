@@ -145,6 +145,7 @@ class VBCvDataset(Dataset):
         return len(self.raw_paths)
 
     def __getitem__(self, index):
+        # print(self.raw_paths[index])
         noisy, _ = librosa.load(os.path.join(self.noisy_root, self.raw_paths[index]), sr=16000)
         clean, _ = librosa.load(os.path.join(self.clean_root, self.raw_paths[index]), sr=16000)
         wav_len = len(noisy)

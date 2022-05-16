@@ -1,6 +1,6 @@
 train:
 #  batch_size: 8
-  batch_size: 12
+  batch_size: 6
   n_epochs: 50
   loss: "com_mse_loss"
   chunk_length: 48000
@@ -18,8 +18,8 @@ model_ddpm:
 
 optim:
   optimizer: 'Adam'
-#  lr: 0.001
-  lr: 0.0005
+  lr: 0.001
+#  lr: 0.0005
   l2: 0.0000001
   half_lr: 3  # whether to decay learning rate to half scale.
   early_stop: 5   # early stop training when no improvement in k epochs.
