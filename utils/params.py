@@ -35,6 +35,7 @@ class AttrDict(dict):
 params = AttrDict(
     deltamu = False,
     pirorgrad=True,
+    ours=False,
     fast_sampling=True,
     noise_schedule=np.linspace(1e-4, 0.05, 50).tolist(),                # diffwave
     inference_noise_schedule=[0.0001, 0.001, 0.01, 0.05, 0.2, 0.5],

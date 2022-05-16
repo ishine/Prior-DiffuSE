@@ -52,7 +52,7 @@ def com_mse_sigma_loss(esti, label, frame_list, mask):
             mask_for_loss.append(tmp_mask)
         mask_for_loss = nn.utils.rnn.pad_sequence(mask_for_loss, batch_first=True).to(esti.device)
         com_mask_for_loss = torch.stack((mask_for_loss, mask_for_loss), dim=1)
-    loss = ((esti - label) * com_mask_for_loss / mask ** 2 * (esti - label) * com_mask_for_loss).sum() / com_mask_for_loss.sum()
+    loss = ((esti - label) * com_mask_for_loss / mask  * (esti - label) * com_mask_for_loss).sum() / com_mask_for_loss.sum()
     return loss
 
 
