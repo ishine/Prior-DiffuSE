@@ -33,13 +33,16 @@
       2. train
          ```python
          python main.py --asset <asset_name> --retrain
-         ```
+      ```
    3. joint train
       ```python
       python main.py --asset <asset_name> --joint
-      ```
+   ```
 3. draw evaluated data include noisy audio, init_audio, predicted_audio, true_delta, predicted_delta, save in the current floder
    ```python
-      python main.py --asset <asset_name> -- retrain --draw
+    python main.py --asset <asset_name> -- retrain --draw
    ```
-   
+4. generate wav file 
+   ```python
+    python ./main.py --retrain --assets asset_priorDiffuse_sigma --sigma --joint --generate
+```
