@@ -912,6 +912,7 @@ class ComplexDDPMTrainer(object):
                     self.model_ddpm.load_state_dict(pretrained_data[2])
                     self.optimizer_ddpm.load_state_dict(pretrained_data[3])
         self.model.eval()
+        torch.backends.cudnn.enabled = True
         alpha, beta, alpha_cum, sigmas, T = self.inference_schedule(fast_sampling=self.params.fast_sampling)
         data_paths = glob.glob(data_path + '/*.wav')
         '''generate wav'''
