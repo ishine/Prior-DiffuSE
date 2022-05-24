@@ -1,26 +1,6 @@
-# Using Diffusion Models for Speech Enhancement
+# Prior-DiffuSE
 
-- [ ] 观察基于Complex Spectrum的范围是否在-1-1之间
-- [ ] 实现Deblurring via Stochastic Refinement同样的方法
-
-
-
-
-
-2.2 
-
-## TODO list:
-
-1. 调整DDPM超参数（现在一个epoch就收敛了）
-   1. lr: 1e-3 -> 2e-4
-   2. lamdba: actually equals to learning rate at beginning
-   3. x_init detached
-   4. loss function: l1 loss -> com_mse_loss
-   5. fast sampling: inference_noise_schedule0.5 -> 0.35 noise_schedule  0.05 -> 0.035 
-2. create function which return X_init after model_dic, X - X_init and X after model_ddpm.
-   1. draw_spectrum added by arg --draw
-3. create function for drawing LS-MAE against Iteration.
-4. added x_init metrics computing
+Our proposed method shows a significant improvement over existing DDPM-based speech enhancement algorithms, i.e., compared to CDiffuSE, the improvements over PESQ and SSNR are 21.72% and 88.49%, respectively.
 
 ## get started
 
@@ -33,11 +13,11 @@
       2. train
          ```python
          python main.py --asset <asset_name> --retrain
-      ```
+         ```
    3. joint train
       ```python
       python main.py --asset <asset_name> --joint
-   ```
+      ```
 3. draw evaluated data include noisy audio, init_audio, predicted_audio, true_delta, predicted_delta, save in the current floder
    ```python
     python main.py --asset <asset_name> -- retrain --draw
@@ -45,4 +25,17 @@
 4. generate wav file 
    ```python
     python ./main.py --retrain --assets asset_priorDiffuse_sigma --sigma --joint --generate
-```
+   ```
+
+## TODO list:
+
+1. tuning DDPM hyperparameters
+   1. lr: 1e-3 -> 2e-4
+   2. lamdba: actually equals to learning rate at beginning
+   3. x_init detached
+   4. loss function: l1 loss -> com_mse_loss
+   5. fast sampling: inference_noise_schedule0.5 -> 0.35 noise_schedule  0.05 -> 0.035 
+2. create function which return X_init after model_dic, X - X_init and X after model_ddpm.
+   1. draw_spectrum added by arg --draw
+3. create function for drawing LS-MAE against Iteration.
+4. added x_init metrics computing
