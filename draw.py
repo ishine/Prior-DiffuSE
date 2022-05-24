@@ -50,7 +50,7 @@ def draw_spec(self, esti_list, label_list, frame_list, feat_type='sqrt'):
             dynamicRange = 100
             vmin = 20 * np.log10(np.max(t_label)) - dynamicRange
 
-            f, ax = plt.subplots(1, figsize=[30, 5])
+            f, ax = plt.subplots(1, figsize=[24, 4])
 
             _, _, _, pcm = ax.specgram(t_esti, NFFT=512, Fs=16000, vmin=vmin, cmap='inferno')
             # plt.colorbar(pcm, ax=ax[0], format='%+2.0f dB')
@@ -63,17 +63,17 @@ def draw_spec(self, esti_list, label_list, frame_list, feat_type='sqrt'):
 
 def draw_wav(index):
     # wav_root = '/home/kevin/code/CDiffuSE/Output/Enhanced/cdiffuse/model507600/test'
-    noisy_root = '/home/judiebig/code/nips2022/data/noisy_testset_wav'
-    clean_root = '/home/judiebig/code/nips2022/data/clean_testset_wav'
-    # enhance_cdiffuse_root = '/home/judiebig/code/CDiffuSE/Output/Enhanced/cdiffuse/model507600/test'
-    enhance_priorDiffuse_root = '/home/judiebig/code/nips2022/asset_priorDiffuse_sigma/wav/diff'
+    noisy_root = '/home/kevin/code/nips2022/data/noisy_testset_wav'
+    clean_root = '/home/kevin/code/nips2022/data/clean_testset_wav'
+    enhance_cdiffuse_root = '/home/kevin/code/CDiffuSE/Output/Enhanced/cdiffuse/model507600/test'
+    enhance_priorDiffuse_root = '/home/kevin/code/nips2022/asset_priorDiffuse_sigma/wav/diff'
 
     raw_paths = [x.split('/')[-1] for x in glob.glob(noisy_root + '/*.wav')]
     print(raw_paths)
     file_name = raw_paths[index]
     data_no, _ = librosa.load(os.path.join(noisy_root, file_name), sr=16000)
     data_cl, _ = librosa.load(os.path.join(clean_root, file_name), sr=16000)
-    # data_en_c, _ = librosa.load(os.path.join(enhance_cdiffuse_root, file_name), sr=16000)
+    data_en_c, _ = librosa.load(os.path.join(enhance_cdiffuse_root, file_name), sr=16000)
     data_en_p, _ = librosa.load(os.path.join(enhance_priorDiffuse_root, file_name), sr=16000)
 
     # batch_result = compareone((data_en, data_cl))
@@ -81,34 +81,40 @@ def draw_wav(index):
     dynamicRange = 100
     vmin = 20*np.log10(np.max(data_cl)) - dynamicRange
     print(raw_paths[index]) # *.wav
-    f,ax=plt.subplots(1,4,figsize=[30,6])
 
-    _,_,_,pcm =  ax[0].specgram(data_no, NFFT=512, Fs=16000,vmin=vmin, cmap='inferno')
-    # plt.colorbar(pcm, ax=ax[0], format='%+2.0f dB')
-    ax[0].set_title("noisy_audio")
+    default_font = {'family': 'Times New Roman', 'weight': 'normal', 'size':30}
+    tick_font = 16
+    y=-0.19
+    f,ax=plt.subplots(1,4,figsize=[20,4], dpi=300)
+    # f.subplots_adjust(top=0.97, bottom=0.2, left=0.05, right=0.995, hspace=0.1, wspace=0.2)
+    f.subplots_adjust( top=0.9, bottom=0.15, left=0.03, right=0.97, hspace=0.4, wspace=0.1)
+
+    _, _, _, pcm = ax[0].specgram(data_no,NFFT=512, Fs=16000, vmin=vmin, cmap='inferno')
+    # plt.colorbar(pcm, ax=ax[1], format='%+2.0f dB')
+    ax[0].set_title("(a) noisy input",default_font, y=y)
     ax[0].axes.xaxis.set_visible(False)
     ax[0].axes.yaxis.set_visible(False)
 
-
-    _, _, _, pcm = ax[1].specgram(data_cl, NFFT=512, Fs=16000, vmin=vmin, cmap='inferno')
-    # plt.colorbar(pcm, ax=ax[1], format='%+2.0f dB')
-    ax[1].set_title("clean_audio")
+    _,_,_,pcm =  ax[1].specgram(data_cl, NFFT=512, Fs=16000,vmin=vmin, cmap='inferno')
+    # plt.colorbar(pcm, ax=ax[0], format='%+2.0f dB')
+    ax[1].set_title("(b) clean target",default_font, y=y)
     ax[1].axes.xaxis.set_visible(False)
     ax[1].axes.yaxis.set_visible(False)
 
-
-    # _, _, _, pcm = ax[2].specgram(data_en_c, NFFT=512, Fs=16000, vmin=vmin, cmap='inferno')
-    # # plt.colorbar(pcm, ax=ax[2], format='%+2.0f dB')
-    # ax[2].set_title("CDiffuse_enhanced_audio")
-    # ax[2].axes.xaxis.set_visible(False)
-    # ax[2].axes.yaxis.set_visible(False)
+    _, _, _, pcm = ax[2].specgram(data_en_c, NFFT=512, Fs=16000, vmin=vmin, cmap='inferno')
+    # plt.colorbar(pcm, ax=ax[2], format='%+2.0f dB')
+    ax[2].set_title("(c) CDiffuSE",default_font, y=y)
+    ax[2].axes.xaxis.set_visible(False)
+    ax[2].axes.yaxis.set_visible(False)
 
     _, _, _, pcm = ax[3].specgram(data_en_p, NFFT=512, Fs=16000, vmin=vmin, cmap='inferno')
     # plt.colorbar(pcm, ax=ax[2], format='%+2.0f dB')
-    ax[3].set_title("PriorDiffuse_enhanced_audio")
+    ax[3].set_title("(d) PriorDiffuse",default_font, y=y)
     ax[3].axes.xaxis.set_visible(False)
     ax[3].axes.yaxis.set_visible(False)
 
+    plt.savefig('vsCDiffuse_6.pdf', bbox_inches='tight')
     plt.show()
 if __name__ == '__main__':
-    draw_wav(0)
+    draw_wav(6)
+    # great example: 4, 6, 26
