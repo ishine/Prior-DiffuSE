@@ -1,8 +1,9 @@
 # Prior-DiffuSE
 
 Our proposed method shows a significant improvement over existing DDPM-based speech enhancement algorithms, i.e., compared to CDiffuSE, the improvements over PESQ and SSNR are 21.72% and 88.49%, respectively.
-
+![image](./img/vsCDiffuse_6.jpg)
 ## get started
+
 
 1. modifie parameter in param.py(config in learner code) and diff.yml(args in learner code)
 2. train
